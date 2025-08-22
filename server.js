@@ -237,7 +237,8 @@ Rules:
 - Return ONLY titles of products that are strong matches.
 - No guessing. If nothing matches, return [].
 - Max 3 items.
-Output JSON: { "matches": ["Product A","Product B"] }
+- Output must be strictly valid JSON only. No explanations.
+Output JSON format: { "matches": ["Product A","Product B"] }
 `;
 
   const resp = await axios.post(
@@ -248,8 +249,18 @@ Output JSON: { "matches": ["Product A","Product B"] }
     { headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY } }
   );
 
-  const text = resp.data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-  return JSON.parse(text);
+  const raw = resp.data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    // Attempt cleanup if Gemini added extra text
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      return JSON.parse(match[0]);
+    }
+    // fallback
+    return { matches: [] };
+  }
 }
 
 // 👇 Add limiter here
