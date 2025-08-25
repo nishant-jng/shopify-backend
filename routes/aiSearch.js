@@ -205,7 +205,8 @@ router.post("/", searchLimiter, async (req, res) => {
     const result = await geminiSearch(query, products);
 
     // Map the titles from the AI response back to the full product objects
-    const matched = products.filter(p => result.matches.includes(p.title));
+   const matched = products.filter(p => result.matches.includes(p.title) && p.imageUrl);
+
 
     res.json({ 
       matches: matched,
