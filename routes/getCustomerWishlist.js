@@ -33,6 +33,20 @@ async function shopifyGraphQL(query, variables = {}) {
   }
 }
 
+// Helper function to normalize product IDs
+function normalizeProductId(id) {
+  if (typeof id === 'string') {
+    // If it's a Global ID, extract the numeric part
+    if (id.includes('gid://shopify/Product/')) {
+      return id.split('/').pop();
+    }
+    // If it's already numeric string, return as is
+    return id;
+  }
+  // If it's a number, convert to string
+  return id.toString();
+}
+
 router.post("/get", async (req, res) => {
   try {
     const { customerId } = req.body;
@@ -41,7 +55,19 @@ router.post("/get", async (req, res) => {
       return res.json({ success: false, error: "Customer ID is required" });
     }
 
-    // Step 1: Fetch customer metafields (REST is fine here)
+    console.log('Received request for customer:', customerId); // Debug log
+
+    // Normalize customer ID - handle both formats
+    let customerGID;
+    if (typeof customerId === 'string' && customerId.includes('gid://shopify/Customer/')) {
+      customerGID = customerId;
+    } else {
+      customerGID = `gid://shopify/Customer/${customerId}`;
+    }
+
+    console.log('Using customer GID:', customerGID); // Debug log
+
+    // Step 1: Fetch customer metafields
     const customerMetafields = await shopifyGraphQL(
       `
       query getCustomerMetafields($id: ID!) {
@@ -59,39 +85,51 @@ router.post("/get", async (req, res) => {
         }
       }
     `,
-      { id: `gid://shopify/Customer/${customerId}` }
+      { id: customerGID }
     );
 
-    const wishlistField = customerMetafields.customer?.metafields.edges.find(
+    console.log('Customer metafields response:', JSON.stringify(customerMetafields, null, 2)); // Debug log
+
+    if (!customerMetafields.customer) {
+      return res.json({ success: false, error: "Customer not found" });
+    }
+
+    const wishlistField = customerMetafields.customer.metafields.edges.find(
       (edge) => edge.node.key === "wishlist"
     );
 
     if (!wishlistField) {
+      console.log('No wishlist metafield found'); // Debug log
       return res.json({ success: true, products: [] });
     }
+
+    console.log('Wishlist metafield value:', wishlistField.node.value); // Debug log
 
     let productIds;
     try {
       productIds = JSON.parse(wishlistField.node.value);
-      if (!Array.isArray(productIds)) productIds = [];
+      if (!Array.isArray(productIds)) {
+        console.log('Wishlist is not an array:', productIds); // Debug log
+        productIds = [];
+      }
     } catch (e) {
+      console.log('Failed to parse wishlist JSON:', e.message); // Debug log
       productIds = [];
     }
+
+    console.log('Parsed product IDs:', productIds); // Debug log
 
     if (productIds.length === 0) {
       return res.json({ success: true, products: [] });
     }
 
-    // Step 2: Fetch products + metafields in one GraphQL query
-    // const productGIDs = productIds.map(
-    //   (id) => `gid://shopify/Product/${id}`
-    // );
-
+    // Step 2: Normalize all product IDs and create GraphQL IDs
     const productGIDs = productIds.map(id => {
-  // Extract the numeric part of the ID, if it's a global ID
-  const numericId = id.split('/').pop();
-  return `gid://shopify/Product/${numericId}`;
-});
+      const numericId = normalizeProductId(id);
+      return `gid://shopify/Product/${numericId}`;
+    });
+
+    console.log('Product GIDs for GraphQL:', productGIDs); // Debug log
 
     const productQuery = `
       query getProducts($ids: [ID!]!) {
@@ -118,6 +156,8 @@ router.post("/get", async (req, res) => {
 
     const productsResp = await shopifyGraphQL(productQuery, { ids: productGIDs });
 
+    console.log('Products response:', JSON.stringify(productsResp, null, 2)); // Debug log
+
     // Format products
     const products = (productsResp.nodes || []).map((product) => {
       if (!product) return null;
@@ -141,14 +181,24 @@ router.post("/get", async (req, res) => {
 
     // Keep order as per wishlist
     const orderedProducts = productIds
-      .map((id) => products.find((p) => p.id === id.toString()))
+      .map((id) => {
+        const numericId = normalizeProductId(id);
+        return products.find((p) => p.id === numericId);
+      })
       .filter(Boolean);
+
+    console.log('Final ordered products:', orderedProducts); // Debug log
 
     res.json({ success: true, products: orderedProducts });
   } catch (error) {
     console.error("Error getting wishlist:", error);
-    res.json({ success: false, error: "Internal server error" });
+    res.json({ success: false, error: error.message || "Internal server error" });
   }
+});
+
+// Add a simple health check endpoint
+router.get("/health", (req, res) => {
+  res.json({ success: true, message: "Wishlist service is running", timestamp: new Date().toISOString() });
 });
 
 module.exports = router;
