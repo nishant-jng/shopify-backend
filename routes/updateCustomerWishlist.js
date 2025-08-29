@@ -132,4 +132,94 @@ router.post("/remove", async (req, res) => {
   }
 });
 
+
+
+router.post('/check', async (req, res) => {
+  try {
+    const { customerId, productId } = req.body;
+
+    if (!customerId || !productId) {
+      return res.json({
+        success: false,
+        error: 'Customer ID and Product ID are required'
+      });
+    }
+
+    // Get current customer data with metafields
+    const customerData = await shopifyFetch(`customers/${customerId}.json`);
+    
+    if (!customerData.customer) {
+      return res.json({
+        success: false,
+        error: 'Customer not found'
+      });
+    }
+
+    // Get existing wishlist metafield
+    const wishlistMetafield = customerData.customer.metafields?.find(
+      metafield => metafield.namespace === 'custom' && metafield.key === 'wishlist'
+    );
+
+    if (!wishlistMetafield || !wishlistMetafield.value) {
+      return res.json({
+        success: true,
+        inWishlist: false
+      });
+    }
+
+    let wishlistIds = [];
+    try {
+      wishlistIds = JSON.parse(wishlistMetafield.value);
+      if (!Array.isArray(wishlistIds)) {
+        wishlistIds = [];
+      }
+    } catch (e) {
+      wishlistIds = [];
+    }
+
+    const inWishlist = wishlistIds.includes(productId.toString());
+
+    res.json({
+      success: true,
+      inWishlist: inWishlist
+    });
+
+  } catch (error) {
+    console.error('Error checking wishlist:', error);
+    res.json({
+      success: false,
+      error: 'Internal server error'
+    });
+  }
+});
+
+
+
+async function shopifyFetch(endpoint, options = {}) {
+  const url = `https://${process.env.SHOPIFY_STORE}/admin/api/2025-07/${endpoint}`;
+
+  try {
+    const response = await axios({
+      url,
+      method: options.method || "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+        ...(options.headers || {}),
+      },
+      data: options.body || undefined, // axios uses `data` instead of body
+    });
+
+    return response.data; // axios auto-parses JSON
+  } catch (error) {
+    if (error.response) {
+      throw new Error(
+        `Shopify API error: ${error.response.status} ${error.response.statusText} - ${JSON.stringify(error.response.data)}`
+      );
+    } else {
+      throw new Error(`Shopify API request failed: ${error.message}`);
+    }
+  }
+}
+
 module.exports = router;

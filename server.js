@@ -8,7 +8,8 @@ dotenv.config();
 // --- Import modular routes ---
 const updateCustomerRoutes = require('./routes/updateCustomer');
 const aiSearchRoutes = require('./routes/aiSearch');
-const customerWishlistRoutes = require('./routes/updateCustomerWishlist');
+const updateCustomerWishlistRoutes = require('./routes/updateCustomerWishlist');
+const getCustomerWishListRoutes = require('./routes/getCustomerWishlist');
 
 // --- Environment Variable Validation ---
 const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, GEMINI_API_KEY, PORT = 3000 } = process.env;
@@ -36,7 +37,8 @@ app.use("/update-customer-metafields", updateCustomerRoutes);
 // All requests to /ai-search will be handled by aiSearchRoutes
 app.use("/ai-search", aiSearchRoutes);
 
-app.use("/wishlist",customerWishlistRoutes)
+app.use("/wishlist",updateCustomerWishlistRoutes);
+app.use("/customer-wishlist", getCustomerWishListRoutes);
 
 
 // --- Core Routes ---
