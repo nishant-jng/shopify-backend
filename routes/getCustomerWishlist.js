@@ -78,7 +78,18 @@ router.post("/get", async (req, res) => {
               node {
                 namespace
                 key
+                type
                 value
+                reference {
+                ... on GenericFile{
+                url
+                }
+                ... on MediaImage {
+                  image {
+                    url
+                  }
+                }
+                  }
               }
             }
           }
@@ -173,9 +184,9 @@ router.post("/get", async (req, res) => {
         product_code:
           metafields.find((m) => m.key === "product_code")?.value || "",
         catalogue_pdf:
-          metafields.find((m) => m.key === "catalogue_pdf")?.value || null,
+         metafields.find((m) => m.key === "catalogue_pdf")?.reference?.url || null,
         group_catalogue:
-          metafields.find((m) => m.key === "group_catalogue")?.value || null,
+          metafields.find((m) => m.key === "group_catalogue")?.reference?.image?.url || null,
       };
     }).filter(Boolean);
 
