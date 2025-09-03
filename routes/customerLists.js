@@ -16,38 +16,61 @@ const shopifyApi = axios.create({
 // Fetch all customer lists
 router.get('/get', async (req, res) => {
   const { customerId } = req.query;
-  if (!customerId) return res.status(400).json({ error: 'Missing customerId' });
+  if (!customerId) return res.status(400).json({ success: false, error: 'Missing customerId' });
 
   try {
     const response = await shopifyApi.get(`/customers/${customerId}/metafields.json?namespace=custom&key=favList`);
     const metafield = (response.data.metafields || [])[0];
     let listNames = [];
     if (metafield && metafield.value) {
-      listNames = JSON.parse(metafield.value);
+      try {
+        listNames = JSON.parse(metafield.value);
+      } catch (parseError) {
+        console.error('Error parsing list names:', parseError);
+        listNames = [];
+      }
     }
     res.json({ success: true, lists: listNames });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error fetching customer lists:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
 // Add a new list name to the metafield
 router.post('/add', async (req, res) => {
   const { customerId, listName } = req.body;
-  if (!customerId || !listName) return res.status(400).json({ error: 'Missing customerId or listName' });
+  if (!customerId || !listName) {
+    return res.status(400).json({ success: false, error: 'Missing customerId or listName' });
+  }
 
   try {
-    // Fetch existing
+    // Fetch existing lists
     const response = await shopifyApi.get(`/customers/${customerId}/metafields.json?namespace=custom&key=favList`);
     let listNames = [];
     let metafieldId = null;
+    
     if (response.data.metafields && response.data.metafields[0]) {
       metafieldId = response.data.metafields[0].id;
-      listNames = JSON.parse(response.data.metafields[0].value);
+      try {
+        listNames = JSON.parse(response.data.metafields[0].value);
+      } catch (parseError) {
+        console.error('Error parsing existing list names:', parseError);
+        listNames = [];
+      }
     }
 
-    if (listNames.includes(listName)) {
-      return res.json({ success: true, message: 'List already exists', lists: listNames });
+    // Check if list already exists (case-insensitive)
+    const existingList = listNames.find(name => 
+      name.toLowerCase() === listName.toLowerCase()
+    );
+    
+    if (existingList) {
+      return res.json({ 
+        success: true, 
+        message: 'List already exists', 
+        lists: listNames 
+      });
     }
 
     // Add new list name
@@ -69,16 +92,24 @@ router.post('/add', async (req, res) => {
       saveResp = await shopifyApi.post(`/customers/${customerId}/metafields.json`, payload);
     }
 
-    res.json({ success: true, lists: listNames, metafield: saveResp.data.metafield });
+    res.json({ 
+      success: true, 
+      lists: listNames, 
+      metafield: saveResp.data.metafield,
+      message: 'List created successfully'
+    });
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Error adding list:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// **NEW: Fetch products for a specific list**
+// Fetch products for a specific list
 router.post('/products', async (req, res) => {
   const { customerId, listName } = req.body;
-  if (!customerId || !listName) return res.status(400).json({ error: 'Missing customerId or listName' });
+  if (!customerId || !listName) {
+    return res.status(400).json({ success: false, error: 'Missing customerId or listName' });
+  }
 
   try {
     // Use a sanitized list name for the metafield key
@@ -102,21 +133,21 @@ router.post('/products', async (req, res) => {
       return res.json({ success: true, products: [] });
     }
 
-    // **REUSE YOUR EXISTING GRAPHQL LOGIC FROM getcustomerwishlist.js**
+    // Fetch product details using GraphQL
     const productsWithDetails = await fetchProductDetailsUsingGraphQL(productIds);
 
     res.json({ success: true, products: productsWithDetails });
   } catch (error) {
     console.error('Error fetching list products:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// **NEW: Add product to a specific list**
+// Add product to a specific list
 router.post('/add-product', async (req, res) => {
   const { customerId, listName, productId } = req.body;
   if (!customerId || !listName || !productId) {
-    return res.status(400).json({ error: 'Missing customerId, listName, or productId' });
+    return res.status(400).json({ success: false, error: 'Missing customerId, listName, or productId' });
   }
 
   try {
@@ -135,19 +166,29 @@ router.post('/add-product', async (req, res) => {
       try {
         productIds = JSON.parse(metafield.value) || [];
       } catch (parseError) {
+        console.error('Error parsing existing product IDs:', parseError);
         productIds = [];
       }
     }
 
-    // **REUSE YOUR EXISTING LOGIC - Convert to GID format like your wishlist**
+    // Convert to GID format (consistent with wishlist format)
     const productGid = `gid://shopify/Product/${productId}`;
 
     // Check if product already exists in the list
-    if (productIds.includes(productGid)) {
-      return res.json({ success: true, message: 'Product already in list', products: productIds });
+    const isAlreadyInList = productIds.some(id => {
+      const numericId = id.toString().replace('gid://shopify/Product/', '');
+      return numericId === productId.toString();
+    });
+
+    if (isAlreadyInList) {
+      return res.json({ 
+        success: true, 
+        message: 'Product already in list', 
+        products: productIds 
+      });
     }
 
-    // Add new product GID (consistent with your wishlist format)
+    // Add new product GID
     productIds.push(productGid);
 
     const payload = {
@@ -155,7 +196,7 @@ router.post('/add-product', async (req, res) => {
         namespace: 'custom',
         key: metafieldKey,
         value: JSON.stringify(productIds),
-        type: 'list.product_reference' // Same type as your wishlist
+        type: 'list.product_reference'
       }
     };
 
@@ -166,18 +207,23 @@ router.post('/add-product', async (req, res) => {
       saveResp = await shopifyApi.post(`/customers/${customerId}/metafields.json`, payload);
     }
 
-    res.json({ success: true, products: productIds, metafield: saveResp.data.metafield });
+    res.json({ 
+      success: true, 
+      products: productIds, 
+      metafield: saveResp.data.metafield,
+      message: 'Product added to list successfully'
+    });
   } catch (error) {
     console.error('Error adding product to list:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// **NEW: Remove product from a specific list**
+// Remove product from a specific list
 router.post('/remove-product', async (req, res) => {
   const { customerId, listName, productId } = req.body;
   if (!customerId || !listName || !productId) {
-    return res.status(400).json({ error: 'Missing customerId, listName, or productId' });
+    return res.status(400).json({ success: false, error: 'Missing customerId, listName, or productId' });
   }
 
   try {
@@ -196,19 +242,19 @@ router.post('/remove-product', async (req, res) => {
       try {
         productIds = JSON.parse(metafield.value) || [];
       } catch (parseError) {
-        return res.status(404).json({ error: 'List not found or invalid' });
+        return res.status(404).json({ success: false, error: 'List not found or invalid' });
       }
     } else {
-      return res.status(404).json({ error: 'List not found' });
+      return res.status(404).json({ success: false, error: 'List not found' });
     }
 
-    // **REUSE YOUR EXISTING REMOVAL LOGIC from updatecustomer.js**
+    // Remove product using the same logic as wishlist removal
     const productGid = `gid://shopify/Product/${productId}`;
     const numericId = productId.toString();
     
     const initialCount = productIds.length;
     
-    // Use the same filtering logic as your wishlist removal
+    // Filter out the product in all possible formats
     productIds = productIds.filter((item) => {
       const itemStr = item.toString();
       return itemStr !== productGid &&           
@@ -217,7 +263,7 @@ router.post('/remove-product', async (req, res) => {
              itemStr.replace('gid://shopify/Product/', '') !== numericId;
     });
 
-    // If the list hasn't changed, the item wasn't there
+    // Check if anything was actually removed
     if (productIds.length === initialCount) {
       return res.json({ 
         success: true, 
@@ -238,20 +284,20 @@ router.post('/remove-product', async (req, res) => {
     res.json({ 
       success: true, 
       products: productIds, 
-      message: 'Product removed from list',
+      message: 'Product removed from list successfully',
       metafield: saveResp.data.metafield 
     });
   } catch (error) {
     console.error('Error removing product from list:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// **NEW: Delete a list entirely**
+// Delete a list entirely
 router.post('/delete', async (req, res) => {
   const { customerId, listName } = req.body;
   if (!customerId || !listName) {
-    return res.status(400).json({ error: 'Missing customerId or listName' });
+    return res.status(400).json({ success: false, error: 'Missing customerId or listName' });
   }
 
   try {
@@ -263,11 +309,18 @@ router.post('/delete', async (req, res) => {
     
     if (listResponse.data.metafields && listResponse.data.metafields[0]) {
       listMetafieldId = listResponse.data.metafields[0].id;
-      listNames = JSON.parse(listResponse.data.metafields[0].value);
+      try {
+        listNames = JSON.parse(listResponse.data.metafields[0].value);
+      } catch (parseError) {
+        console.error('Error parsing list names for deletion:', parseError);
+        listNames = [];
+      }
     }
 
-    // Remove the list name
-    const updatedListNames = listNames.filter(name => name !== listName);
+    // Remove the list name (case-insensitive)
+    const updatedListNames = listNames.filter(name => 
+      name.toLowerCase() !== listName.toLowerCase()
+    );
 
     // Update the main list metafield
     if (listMetafieldId) {
@@ -298,13 +351,13 @@ router.post('/delete', async (req, res) => {
     });
   } catch (error) {
     console.error('Error deleting list:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// **REUSED FUNCTION: GraphQL product fetching from your getcustomerwishlist.js**
+// GraphQL product fetching function (reused from wishlist code)
 async function fetchProductDetailsUsingGraphQL(productIds) {
-  // Shopify GraphQL Fetcher (copied from your code)
+  // Shopify GraphQL Fetcher
   async function shopifyGraphQL(query, variables = {}) {
     const url = `https://${process.env.SHOPIFY_STORE}/admin/api/2025-07/graphql.json`;
 
@@ -335,7 +388,7 @@ async function fetchProductDetailsUsingGraphQL(productIds) {
     }
   }
 
-  // Helper function to normalize product IDs (copied from your code)
+  // Helper function to normalize product IDs
   function normalizeProductId(id) {
     if (typeof id === 'string') {
       if (id.includes('gid://shopify/Product/')) {
@@ -387,7 +440,7 @@ async function fetchProductDetailsUsingGraphQL(productIds) {
 
   const productsResp = await shopifyGraphQL(productQuery, { ids: productGIDs });
 
-  // Format products (copied from your code)
+  // Format products
   const products = (productsResp.nodes || []).map((product) => {
     if (!product) return null;
 
@@ -405,7 +458,7 @@ async function fetchProductDetailsUsingGraphQL(productIds) {
     };
   }).filter(Boolean);
 
-  // Keep order as per list
+  // Keep order as per the original list
   const orderedProducts = productIds
     .map((id) => {
       const numericId = normalizeProductId(id);
