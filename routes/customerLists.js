@@ -106,7 +106,7 @@ router.post('/add', async (req, res) => {
 });
 
 router.post('/create', async (req, res) => {
-  const { customerId, listName } = req.body;
+  const { customerId, listName} = req.body;
 
   // 1. Input validation
   if (!customerId || !listName) {
@@ -115,9 +115,10 @@ router.post('/create', async (req, res) => {
       error: 'Missing required fields: customerId and listName are required'
     });
   }
+
   // Ensure shop has correct format
   const shopDomain = process.env.SHOPIFY_STORE;
-  const accessToken= process.env.SHOPIFY_ADMIN_TOKEN;
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
 
   try {
     console.log(`Processing request for customer ${customerId} on shop ${shopDomain}`);
@@ -399,6 +400,163 @@ router.post('/test', async (req, res) => {
       success: false,
       error: 'Connection failed',
       message: error.message,
+      details: error.response?.data
+    });
+  }
+});
+
+// Debug endpoint to check existing metafields and their types
+router.post('/debug', async (req, res) => {
+  const { customerId} = req.body;
+  
+  if (!customerId) {
+    return res.status(400).json({
+      error: 'Missing required fields: customerId, shop, accessToken'
+    });
+  }
+
+  const shopDomain = process.env.SHOPIFY_STORE;
+  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+
+  try {
+    const restConfig = {
+      baseURL: `https://${shopDomain}/admin/api/2025-01`,
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+        'Content-Type': 'application/json'
+      }
+    };
+
+    // Get all metafields for this customer
+    const metafieldsResponse = await axios.get(`/customers/${customerId}/metafields.json`, restConfig);
+    
+    // Get metafield definitions
+    const definitionsQuery = `
+      query {
+        metafieldDefinitions(first: 50, ownerType: CUSTOMER, namespace: "custom") {
+          edges {
+            node {
+              id
+              name
+              key
+              namespace
+              type {
+                name
+              }
+              description
+            }
+          }
+        }
+      }
+    `;
+
+    const graphqlResponse = await axios.post(`https://${shopDomain}/admin/api/2025-01/graphql.json`, {
+      query: definitionsQuery
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    res.json({
+      success: true,
+      customer: customerId,
+      metafields: metafieldsResponse.data.metafields,
+      definitions: graphqlResponse.data?.data?.metafieldDefinitions?.edges || []
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      details: error.response?.data
+    });
+  }
+});
+
+// Endpoint to create the favList metafield definition if it doesn't exist
+router.post('/setup-favlist-definition', async (req, res) => {
+  const { shop, accessToken } = req.body;
+  
+  if (!shop || !accessToken) {
+    return res.status(400).json({
+      error: 'Missing shop or accessToken'
+    });
+  }
+
+  const shopDomain = shop.includes('.myshopify.com') ? shop : `${shop}.myshopify.com`;
+
+  try {
+    const createMutation = `
+      mutation MetafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
+        metafieldDefinitionCreate(definition: $definition) {
+          createdDefinition {
+            id
+            name
+            key
+            namespace
+            type {
+              name
+            }
+          }
+          userErrors {
+            field
+            message
+            code
+          }
+        }
+      }
+    `;
+
+    const definitionInput = {
+      name: "Favorite Lists",
+      namespace: "custom",
+      key: "favList",
+      type: "list.single_line_text_field",
+      ownerType: "CUSTOMER",
+      visibleToStorefrontApi: true,
+      description: "List of favorite list names for the customer"
+    };
+
+    const graphqlResponse = await axios.post(`https://${shopDomain}/admin/api/2025-01/graphql.json`, {
+      query: createMutation,
+      variables: { definition: definitionInput }
+    }, {
+      headers: {
+        'X-Shopify-Access-Token': accessToken,
+        'Content-Type': 'application/json'
+      }
+    });
+
+    const result = graphqlResponse.data?.data?.metafieldDefinitionCreate;
+    
+    if (result?.userErrors && result.userErrors.length > 0) {
+      if (result.userErrors[0].code === "DUPLICATE_KEY_NAMESPACE") {
+        return res.json({
+          success: true,
+          message: "FavList definition already exists",
+          status: "exists"
+        });
+      } else {
+        return res.status(422).json({
+          success: false,
+          error: "Failed to create definition",
+          errors: result.userErrors
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: "FavList definition created successfully",
+      definition: result?.createdDefinition
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message,
       details: error.response?.data
     });
   }
