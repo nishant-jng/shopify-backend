@@ -847,6 +847,63 @@ async function fetchProductDetailsUsingGraphQL(productIds) {
     }
   }
 
+  // Add this route to your customer-lists.js file
+router.post('/check-product', async (req, res) => {
+  const { customerId, productId } = req.body;
+  if (!customerId || !productId) {
+    return res.status(400).json({ success: false, error: 'Missing customerId or productId' });
+  }
+
+  try {
+    // Get all lists
+    const listsResponse = await shopifyApi.get(`/customers/${customerId}/metafields.json?namespace=custom&key=favList`);
+    let listNames = [];
+    
+    if (listsResponse.data.metafields && listsResponse.data.metafields[0]) {
+      try {
+        listNames = JSON.parse(listsResponse.data.metafields[0].value);
+      } catch (parseError) {
+        listNames = [];
+      }
+    }
+
+    const listsContainingProduct = [];
+    
+    // Check each list for the product
+    for (const listName of listNames) {
+      const metafieldKey = `favList_${listName.replace(/[^a-zA-Z0-9]/g, '_')}`;
+      const response = await shopifyApi.get(`/customers/${customerId}/metafields.json?namespace=custom&key=${metafieldKey}`);
+      
+      if (response.data.metafields && response.data.metafields[0]) {
+        try {
+          const productIds = JSON.parse(response.data.metafields[0].value) || [];
+          const productGid = `gid://shopify/Product/${productId}`;
+          
+          const isInList = productIds.some(id => {
+            const numericId = id.toString().replace('gid://shopify/Product/', '');
+            return numericId === productId.toString();
+          });
+          
+          if (isInList) {
+            listsContainingProduct.push(listName);
+          }
+        } catch (parseError) {
+          continue;
+        }
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      inLists: listsContainingProduct,
+      isInAnyList: listsContainingProduct.length > 0
+    });
+  } catch (error) {
+    console.error('Error checking product in lists:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
   // Helper function to normalize product IDs
   function normalizeProductId(id) {
     if (typeof id === 'string') {
