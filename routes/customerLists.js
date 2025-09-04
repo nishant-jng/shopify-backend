@@ -118,7 +118,7 @@ router.post('/create', async (req, res) => {
 
   // Ensure shop has correct format
   const shopDomain = process.env.SHOPIFY_STORE;
-  const accessToken = process.env.SHOPIFY_ACCESS_TOKEN;
+  const accessToken = process.env.SHOPIFY_ADMIN_TOKEN;
 
   try {
     console.log(`Processing request for customer ${customerId} on shop ${shopDomain}`);
@@ -195,7 +195,7 @@ router.post('/create', async (req, res) => {
         namespace: 'custom',
         key: 'favList',
         value: JSON.stringify(listNames),
-        type: 'json'
+        type: 'list.single_line_text_field'
       }
     };
 
@@ -244,7 +244,9 @@ router.post('/create', async (req, res) => {
       key: safeListKey,
       type: "list.product_reference",
       ownerType: "CUSTOMER",
-      visibleToStorefrontApi: true,
+      access: {
+        storefront: 'PUBLIC_READ'
+    },
       description: `Favorite products list: ${listName}`
     };
 
