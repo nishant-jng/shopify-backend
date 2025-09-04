@@ -1,6 +1,7 @@
 const express = require('express');
 const axios = require('axios');
 const router = express.Router();
+const { shopify } = require('../shopify');
 
 const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN } = process.env;
 
@@ -104,6 +105,149 @@ router.post('/add', async (req, res) => {
   }
 });
 
+
+router.post('/create', async (req, res) => {
+ const { customerId, listName } = req.body;
+
+ // 1. Input validation
+ if (!customerId || !listName) {
+ return res.status(400).json({
+ success: false,
+ error: 'Missing customerId or listName'
+ });
+ }
+
+ const session = res.locals.shopify.session;
+ if (!session) {
+ return res.status(401).json({ success: false, error: "Unauthorized: No session found." });
+ }
+
+try {
+// Create REST and GraphQL clients using the current session
+const restClient = new shopify.clients.Rest({ session });
+const graphqlClient = new shopify.clients.Graphql({ session });
+
+// 2. Fetch the existing metafield that stores the list of names using the REST client
+const metafieldsResponse = await restClient.get({
+path: `/customers/${customerId}/metafields.json`,
+query: { namespace: 'custom', key: 'favList' }
+});
+
+let listNames = [];
+let metafieldId = null;
+const existingMetafield = metafieldsResponse.body.metafields?.[0];
+
+if (existingMetafield) {
+metafieldId = existingMetafield.id;
+try {
+listNames = existingMetafield.value ? JSON.parse(existingMetafield.value) : [];
+} catch (parseError) {
+ console.error('Error parsing existing list names, resetting to empty array:', parseError);
+ listNames = [];
+}
+ }
+
+ // 3. Check for duplicates (case-insensitive)
+ const listExists = listNames.some(name => name.toLowerCase() === listName.toLowerCase());
+ 
+ if (listExists) {
+ return res.json({
+ success: true,
+ message: 'List already exists',
+ lists: listNames
+ });
+ }
+
+ // 4. Add the new list name and save the updated array to the customer's metafield
+ listNames.push(listName);
+ const listNamesPayload = {
+ metafield: {
+ namespace: 'custom',
+ key: 'favList',
+ value: JSON.stringify(listNames),
+ type: 'list.single_line_text_field'
+ }
+ };
+
+ if (metafieldId) {
+ // Update existing metafield
+ await restClient.put({
+ path: `/metafields/${metafieldId}.json`,
+ data: listNamesPayload
+ });
+ } else {
+ // Create new metafield for the customer
+ await restClient.post({
+ path: `/customers/${customerId}/metafields.json`,
+ data: listNamesPayload
+ });
+ }
+
+ // 5. Sanitize listName to create a valid key for the metafield definition
+ const safeListKey = listName.toLowerCase()
+ .replace(/[^a-z0-9]+/g, '_')
+ .replace(/^_|_$/g, '');
+
+ // 6. Create metafield definition using the GraphQL client
+ const createMutation = `
+ mutation MetafieldDefinitionCreate($definition: MetafieldDefinitionInput!) {
+ metafieldDefinitionCreate(definition: $definition) {
+ createdDefinition {
+id
+name
+ }
+ userErrors {
+field
+message
+code
+}
+}
+}
+`;
+const definitionInput = {
+name: listName,
+namespace: "custom",
+key: safeListKey,
+type: "list.product_reference",
+ownerType: "CUSTOMER",
+visibleToStorefrontApi: true
+};
+const createResponse = await graphqlClient.query({
+data: {
+query: createMutation,
+variables: { definition: definitionInput }
+}
+});
+
+const userErrors = createResponse.body.data.metafieldDefinitionCreate.userErrors;
+if (userErrors && userErrors.length > 0) {
+  const code = userErrors[0].code;
+// Handle the "already exists" error gracefully
+if (code === "DUPLICATE_KEY_NAMESPACE") {
+  console.log("Metafield definition already exists for this key. Skipping creation.");
+} else {
+throw new Error("Failed to create metafield definition: " + JSON.stringify(userErrors));
+}
+} else {
+  console.log("✅ Created new definition:", createResponse.body.data.metafieldDefinitionCreate.createdDefinition);
+}
+
+// 7. Send a final success response to the client
+res.status(201).json({
+success: true,
+message: 'List created successfully',
+lists: listNames
+});
+
+} catch (error) {
+console.error('Error creating list:', error.message);
+res.status(500).json({
+  success: false,
+error: error.message,
+details: error.stack
+});
+}
+});
 // Fetch products for a specific list
 router.post('/products', async (req, res) => {
   const { customerId, listName } = req.body;
