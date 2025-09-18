@@ -1062,7 +1062,6 @@ router.post('/rename', async (req, res) => {
 });
 
 
-// Add this route to your customer-lists.js file
 router.get('/image-proxy', async (req, res) => {
   const imageUrl = req.query.url;
   
@@ -1074,9 +1073,6 @@ router.get('/image-proxy', async (req, res) => {
   
   try {
     console.log('Fetching image from:', imageUrl);
-    
-    // Import axios if not already imported at the top
-    const axios = require('axios');
     
     const response = await axios({
       url: imageUrl,
