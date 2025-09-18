@@ -1,7 +1,6 @@
 const express = require("express");
 const cors = require("cors");
 const dotenv = require("dotenv");
-
 // Load environment variables from .env file
 dotenv.config();
 
@@ -12,7 +11,7 @@ const updateCustomerWishlistRoutes = require('./routes/updateCustomerWishlist');
 const getCustomerWishListRoutes = require('./routes/getCustomerWishlist');
 const customerListsRoutes = require('./routes/customerLists');
 
-
+const shareListRoutes = require('./routes/shareList');
 
 
 // --- Environment Variable Validation ---
@@ -46,7 +45,7 @@ app.use("/wishlist",updateCustomerWishlistRoutes);
 app.use("/customer-wishlist", getCustomerWishListRoutes);
 
 app.use('/customer-lists', customerListsRoutes); 
-
+app.use("/share-list", shareListRoutes);
 // --- Core Routes ---
 // Health check endpoint to verify the server is running
 app.get("/health", (req, res) => {
