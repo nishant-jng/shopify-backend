@@ -1061,105 +1061,63 @@ router.post('/rename', async (req, res) => {
   }
 });
 
-// Add this route to your existing customer-lists.js file
-router.post('/convert-images-to-base64', async (req, res) => {
-  const { imageUrls } = req.body;
-  
-  if (!imageUrls || !Array.isArray(imageUrls)) {
-    return res.status(400).json({ success: false, error: 'imageUrls array is required' });
-  }
 
-  try {
-    const convertedImages = await Promise.all(
-      imageUrls.map(async (url, index) => {
-        try {
-          if (!url) {
-            return {
-              originalUrl: url,
-              base64: 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODAiIGhlaWdodD0iODAiIHZpZXdCb3g9IjAgMCA4MCA4MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjgwIiBoZWlnaHQ9IjgwIiBmaWxsPSIjRjVGNUY1Ii8+CjxwYXRoIGQ9Ik00MCAyMEM0My4zMTM3IDIwIDQ2IDIyLjY4NjMgNDYgMjZWMzRINTRDNTcuMzEzNyAzNCA2MCAzNi42ODYzIDYwIDQwUzU3LjMxMzcgNDYgNTQgNDZINDZWNTRDNDYgNTcuMzEzNyA0My4zMTM3IDYwIDQwIDYwUzM0IDU3LjMxMzcgMzQgNTRWNDZIMjZDMjIuNjg2MyA0NiAyMCA0My4zMTM3IDIwIDQwUzIyLjY4NjMgMzQgMjYgMzRIMzRWMjZDMzQgMjIuNjg2MyAzNi42ODYzIDIwIDQwIDIwWiIgZmlsbD0iI0NDQ0NDQyIvPgo8L3N2Zz4K'
-            };
-          }
-
-          console.log(`Fetching image ${index + 1}/${imageUrls.length}: ${url}`);
-          
-          const response = await axios.get(url, {
-            responseType: 'arraybuffer',
-            timeout: 10000,
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-          });
-          
-          const buffer = Buffer.from(response.data);
-          const contentType = response.headers['content-type'] || 'image/jpeg';
-          const base64 = `data:${contentType};base64,${buffer.toString('base64')}`;
-          
-          return {
-            originalUrl: url,
-            base64: base64
-          };
-          
-        } catch (error) {
-          console.error(`Failed to convert image ${index + 1}:`, error.message);
-          return {
-            originalUrl: url,
-            base64: 'data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iODAiIGhlaWdodD0iODAiIHZpZXdCb3g9IjAgMCA4MCA4MCIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHJlY3Qgd2lkdGg9IjgwIiBoZWlnaHQ9IjgwIiBmaWxsPSIjRjVGNUY1Ii8+CjxwYXRoIGQ9Ik00MCAyMEM0My4zMTM3IDIwIDQ2IDIyLjY4NjMgNDYgMjZWMzRINTRDNTcuMzEzNyAzNCA2MCAzNi42ODYzIDYwIDQwUzU3LjMxMzcgNDYgNTQgNDZINDZWNTRDNDYgNTcuMzEzNyA0My4zMTM3IDYwIDQwIDYwUzM0IDU3LjMxMzcgMzQgNTRWNDZIMjZDMjIuNjg2MyA0NiAyMCA0My4zMTM3IDIwIDQwUzIyLjY4NjMgMzQgMjYgMzRIMzRWMjZDMzQgMjIuNjg2MyAzNi42ODYzIDIwIDQwIDIwWiIgZmlsbD0iI0NDQ0NDQyIvPgo8L3N2Zz4K',
-            error: error.message
-          };
-        }
-      })
-    );
-
-    res.json({
-      success: true,
-      images: convertedImages
-    });
-
-  } catch (error) {
-    console.error('Error in convert-images-to-base64:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message
-    });
-  }
-});
-
-// Add this image proxy route to your customer-lists router
+// Add this route to your customer-lists.js file
 router.get('/image-proxy', async (req, res) => {
   const imageUrl = req.query.url;
   
+  console.log('Image proxy request:', imageUrl);
+  
   if (!imageUrl) {
-    return res.status(400).send('Missing URL parameter');
+    return res.status(400).json({ error: 'Missing URL parameter' });
   }
   
   try {
-    console.log('Proxying image:', imageUrl);
+    console.log('Fetching image from:', imageUrl);
+    
+    // Import axios if not already imported at the top
+    const axios = require('axios');
     
     const response = await axios({
       url: imageUrl,
       method: 'GET',
       responseType: 'stream',
-      timeout: 10000,
+      timeout: 15000,
       headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; ImageProxy/1.0)'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
     });
     
-    // Set CORS headers
+    console.log('Image fetched successfully');
+    
+    // Set proper headers
     res.set({
       'Content-Type': response.headers['content-type'] || 'image/jpeg',
+      'Content-Length': response.headers['content-length'],
       'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET',
       'Cache-Control': 'public, max-age=3600'
     });
     
-    // Pipe the image directly to response
+    // Stream the image to client
     response.data.pipe(res);
     
   } catch (error) {
-    console.error('Image proxy error:', error);
-    res.status(404).send('Image not found');
+    console.error('Image proxy error:', error.message);
+    
+    if (error.code === 'ETIMEDOUT') {
+      return res.status(408).send('Request timeout');
+    } else if (error.code === 'ENOTFOUND') {
+      return res.status(404).send('Image not found');
+    } else if (error.response && error.response.status) {
+      return res.status(error.response.status).send('Image fetch failed');
+    }
+    
+    res.status(500).send('Internal server error');
   }
 });
 
-
+// Make sure this comes AFTER all your routes
 module.exports = router;
+
+
