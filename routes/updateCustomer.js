@@ -273,7 +273,7 @@ router.post("/", async (req, res) => {
     {
       ownerId: `gid://shopify/Customer/${customerId}`,
       namespace: "custom",
-      key: "phone",
+      key: "contact",
       type: "single_line_text_field",
       value: formattedPhone || ""
     },
