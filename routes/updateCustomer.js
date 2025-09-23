@@ -119,7 +119,6 @@
 // // Export the router to be used in server.js
 // module.exports = router;
 const nodemailer = require('nodemailer');
-
 const express = require("express");
 const axios = require("axios");
 const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber');
@@ -130,7 +129,7 @@ const phoneUtil = PhoneNumberUtil.getInstance();
 
 // Get Shopify credentials from environment variables
 const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, EMAIL_PASS, EMAIL_USER} = process.env;
-const transporter = nodemailer.createTransporter({
+const transporter = nodemailer.createTransport({
   service: process.env.EMAIL_SERVICE || 'gmail',
   auth: {
     user: EMAIL_USER,
