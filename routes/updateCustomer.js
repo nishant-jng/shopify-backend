@@ -581,7 +581,7 @@ router.get("/customers", async (req, res) => {
 `;
 
   const variables = {
-  first: Math.min(parseInt(limit), 250), // Increased from 100 to 250 for more recent customers
+  first: Math.min(parseInt(limit),20), // Increased from 100 to 250 for more recent customers
   ...(after && { after })
 };
 
