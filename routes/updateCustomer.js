@@ -544,46 +544,46 @@ router.get("/customers", async (req, res) => {
   const { limit = 50, after } = req.query; // Support pagination
   
   const query = `
-    query getCustomers($first: Int!, $after: String) {
-      customers(first: $first, after: $after) {
-        pageInfo {
-          hasNextPage
-          hasPreviousPage
-          startCursor
-          endCursor
-        }
-        edges {
-          cursor
-          node {
-            id
-            firstName
-            lastName
-            email
-            phone
-            createdAt
-            updatedAt
-            tags
-            metafields(first: 20, namespace: "custom") {
-              edges {
-                node {
-                  id
-                  namespace
-                  key
-                  value
-                  type
-                }
+  query getCustomers($first: Int!, $after: String) {
+    customers(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) {
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+        startCursor
+        endCursor
+      }
+      edges {
+        cursor
+        node {
+          id
+          firstName
+          lastName
+          email
+          phone
+          createdAt
+          updatedAt
+          tags
+          metafields(first: 20, namespace: "custom") {
+            edges {
+              node {
+                id
+                namespace
+                key
+                value
+                type
               }
             }
           }
         }
       }
     }
-  `;
+  }
+`;
 
   const variables = {
-    first: Math.min(parseInt(limit), 100), // Cap at 100 for performance
-    ...(after && { after })
-  };
+  first: Math.min(parseInt(limit), 250), // Increased from 100 to 250 for more recent customers
+  ...(after && { after })
+};
 
   try {
     const response = await axios({
