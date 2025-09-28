@@ -675,5 +675,121 @@ router.get("/customers", async (req, res) => {
   }
 });
 
+
+router.post("/verify", async (req, res) => {
+  const { customerId, isVerified } = req.body;
+
+  // Input Validation
+  if (!customerId) {
+    return res.status(400).json({
+      error: 'Missing required field',
+      details: 'customerId is a required field'
+    });
+  }
+  
+  if (!/^\d+$/.test(customerId.toString())) {
+    return res.status(400).json({
+      error: 'Invalid customerId',
+      details: 'customerId must be a numeric value'
+    });
+  }
+
+  if (typeof isVerified !== 'boolean') {
+    return res.status(400).json({
+      error: 'Invalid isVerified value',
+      details: 'isVerified must be a boolean (true or false)'
+    });
+  }
+
+  // GraphQL Mutation
+  const query = `
+    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        metafields { id key value namespace type }
+        userErrors { field message code }
+      }
+    }
+  `;
+
+  // Construct Metafield Payload
+  const metafieldsPayload = [
+    {
+      ownerId: `gid://shopify/Customer/${customerId}`,
+      namespace: "custom",
+      key: "isverified",
+      type: "boolean",
+      value: isVerified.toString() // Booleans must be passed as strings "true" or "false"
+    }
+  ];
+
+  const variables = {
+    metafields: metafieldsPayload
+  };
+
+  // API Call to Shopify
+  try {
+    const response = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN
+      },
+      data: { query, variables }
+    });
+
+    const result = response.data;
+
+    // Handle Shopify's response
+    if (result.errors) {
+      console.error('GraphQL errors:', result.errors);
+      return res.status(400).json({
+        error: 'GraphQL errors occurred',
+        details: result.errors
+      });
+    }
+
+    if (result.data?.metafieldsSet?.userErrors?.length > 0) {
+      console.error('User errors:', result.data.metafieldsSet.userErrors);
+      return res.status(400).json({
+        error: 'Metafield validation errors',
+        details: result.data.metafieldsSet.userErrors
+      });
+    }
+
+    console.log(`Successfully updated isVerified status for customer ${customerId} to ${isVerified}`);
+
+    res.json({
+      success: true,
+      data: result.data.metafieldsSet.metafields,
+      message: `Customer verification status updated to ${isVerified}`
+    });
+
+  } catch (err) {
+    // Handle network/server errors
+    console.error('Unexpected error during verification update:', err.message);
+    
+    if (err.response) {
+      console.error('Response error:', err.response.data);
+      return res.status(err.response.status).json({
+        error: "Failed to update verification status - Server Error",
+        details: err.response.data || err.message
+      });
+    } else if (err.request) {
+      console.error('Request error:', err.request);
+      return res.status(500).json({
+        error: "Failed to update verification status - Network Error",
+        details: 'No response received from Shopify API'
+      });
+    } else {
+      return res.status(500).json({
+        error: "Failed to update verification status",
+        details: err.message || 'An unexpected error occurred'
+      });
+    }
+  }
+});
+
+
 // Export the router to be used in server.js
 module.exports = router;
