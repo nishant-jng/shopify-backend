@@ -3,7 +3,6 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const admin = require("firebase-admin");
 const path = require("path");
-const dotenv = require("dotenv");
 
 dotenv.config();
 
