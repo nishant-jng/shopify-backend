@@ -1,10 +1,10 @@
+const dotenv = require("dotenv");
+dotenv.config();
 const express = require("express");
 const cors = require("cors");
-const dotenv = require("dotenv");
-const admin = require("firebase-admin");
-const path = require("path");
+// const admin = require("firebase-admin");
 
-dotenv.config();
+
 
 // --- Import modular routes ---
 const updateCustomerRoutes = require('./routes/updateCustomer');
