@@ -987,19 +987,6 @@ router.post('/check-product', async (req, res) => {
   return orderedProducts;
 }
 
-// creating custom user
-
-const admin = require('firebase-admin');
-
-// IMPORTANT: Initialize Firebase Admin SDK (do this once when your server starts)
-// You must get your service account key JSON from the Firebase console
-// Firebase Console -> Project Settings -> Service accounts -> Generate new private key
-const serviceAccount = require('.serviceaccountkey.json');
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount)
-});
-
-const db = admin.firestore();
 
 // The new, all-in-one endpoint
 router.post('/create-and-sync-user', async (req, res) => {
