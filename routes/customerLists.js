@@ -1113,6 +1113,66 @@ router.get('/image-proxy', async (req, res) => {
   }
 });
 
+
+// Add this new route to your customer-lists.js file
+
+router.post('/sync-customer', async (req, res) => {
+  const { email, firstName, lastName } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ success: false, error: 'Email is required' });
+  }
+
+  try {
+    const payload = {
+      customer: {
+        first_name: firstName || '',
+        last_name: lastName || '',
+        email: email,
+      }
+    };
+
+    console.log('Attempting to create Shopify customer:', payload);
+
+    // Make the API call to Shopify to create the customer
+    const shopifyResponse = await shopifyApi.post('/customers.json', payload);
+
+    const newCustomer = shopifyResponse.data.customer;
+
+    if (!newCustomer || !newCustomer.id) {
+      throw new Error('Shopify did not return a valid customer object.');
+    }
+
+    console.log('Successfully created Shopify customer with ID:', newCustomer.id);
+
+    // Send the new, official Shopify Customer ID back to the Flutter app
+    res.json({
+      success: true,
+      message: 'Shopify customer created successfully.',
+      shopifyCustomerId: newCustomer.id
+    });
+
+  } catch (error) {
+    // This handles cases where the customer email might already exist in Shopify
+    if (error.response && error.response.status === 422) {
+      console.log('Customer likely already exists. Fetching existing customer.');
+      // If customer exists, find them by email to get their ID
+      const existingCustomerResponse = await shopifyApi.get(`/customers/search.json?query=email:${email}`);
+      const existingCustomer = existingCustomerResponse.data.customers[0];
+      if (existingCustomer) {
+        return res.json({
+          success: true,
+          message: 'Customer already exists.',
+          shopifyCustomerId: existingCustomer.id
+        });
+      }
+    }
+
+    console.error('Error in /sync-customer:', error.message);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
 // Make sure this comes AFTER all your routes
 module.exports = router;
 
