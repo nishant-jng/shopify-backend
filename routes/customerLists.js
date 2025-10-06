@@ -986,14 +986,15 @@ router.post('/check-product', async (req, res) => {
   return orderedProducts;
 }
 
-// creating custom user 
+// creating custom user
 
-// In your backend (e.g., customer-lists.js)
+// In your backend file (e.g., customer-lists.js)
 
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin SDK (do this once when your server starts)
-// You need to get your service account key JSON from the Firebase console
+// IMPORTANT: Initialize Firebase Admin SDK (do this once when your server starts)
+// You must get your service account key JSON from the Firebase console
+// Firebase Console -> Project Settings -> Service accounts -> Generate new private key
 const serviceAccount = require('./path/to/your/serviceAccountKey.json');
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount)
@@ -1041,7 +1042,7 @@ router.post('/create-and-sync-user', async (req, res) => {
     });
     console.log(`Stored user data in Firestore for UID: ${uid}`);
 
-    // STEP 3: Return the Shopify ID to the Flutter app
+    // STEP 3: Return the Shopify ID to the client
     res.json({
       success: true,
       message: 'User synced successfully across Shopify and Firebase.',
@@ -1053,8 +1054,6 @@ router.post('/create-and-sync-user', async (req, res) => {
     res.status(500).json({ success: false, error: 'Failed to sync user.' });
   }
 });
-
-
 
 // Rename an existing list
 router.post('/rename', async (req, res) => {
