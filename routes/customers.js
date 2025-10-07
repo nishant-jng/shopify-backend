@@ -1,7 +1,7 @@
 const nodemailer = require('nodemailer');
 const express = require("express");
 const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber');
-const { db } = require("../firebaseConfig.js");
+const { admin, db } = require("../firebaseConfig.js");
 const router = express.Router();
 const axios = require("axios");
 
@@ -19,6 +19,14 @@ const transporter = nodemailer.createTransport({
     pass: EMAIL_PASS
   }
 });
+const shopifyApi = axios.create({
+  baseURL: `https://${process.env.SHOPIFY_STORE}/admin/api/2025-07`,
+  headers: {
+    "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+    "Content-Type": "application/json",
+  },
+});
+
 
 async function sendAdminNotification(customerData) {
   const emailContent = `
@@ -445,40 +453,90 @@ router.get("/customer/:customerId", async (req, res) => {
 router.post('/create-and-sync-user', async (req, res) => {
   const { uid, email, name } = req.body;
 
-  if (!uid || !email) {
-    return res.status(400).json({ success: false, error: 'Firebase UID and email are required' });
+  // Enhanced validation
+  if (!uid || !email || !name) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Firebase UID, email, and name are required' 
+    });
+  }
+
+  // Email validation
+  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  if (!emailRegex.test(email)) {
+    return res.status(400).json({ 
+      success: false, 
+      error: 'Invalid email format' 
+    });
   }
 
   try {
     let shopifyCustomerId;
 
+    // Split name into first and last
+    const nameParts = name.trim().split(' ');
+    const firstName = nameParts[0];
+    const lastName = nameParts.slice(1).join(' ') || firstName;
+
     // STEP 1: Create or find the customer in Shopify
     try {
-      const shopifyPayload = { customer: { first_name: name, email: email } };
+      const shopifyPayload = { 
+        customer: { 
+          first_name: firstName,
+          last_name: lastName,
+          email: email,
+          email_marketing_consent: {
+            state: 'not_subscribed',
+            opt_in_level: 'single_opt_in'
+          },
+          tags: 'firebase-synced',
+          note: `Synced from Firebase UID: ${uid}`
+        } 
+      };
+      
+      // Use versioned endpoint
       const shopifyResponse = await shopifyApi.post('/customers.json', shopifyPayload);
       shopifyCustomerId = shopifyResponse.data.customer.id;
       console.log(`Created new Shopify customer with ID: ${shopifyCustomerId}`);
+      
     } catch (error) {
       if (error.response && error.response.status === 422) {
-        // User email already exists in Shopify, so we find them instead.
-        console.log('Customer likely exists in Shopify. Fetching...');
-        const existingCust = await shopifyApi.get(`/customers/search.json?query=email:${email}`);
-        shopifyCustomerId = existingCust.data.customers[0]?.id;
-        if (!shopifyCustomerId) throw new Error('Existing Shopify customer could not be found by email.');
+        // Customer already exists, search for them
+        console.log('Customer exists in Shopify. Searching...');
+        
+        // URL-encode the email for safe query
+        const encodedEmail = encodeURIComponent(email);
+        const searchUrl = `/customers/search.json?query=email:${encodedEmail}`;
+        const existingCust = await shopifyApi.get(searchUrl);
+        
+        if (!existingCust.data.customers || existingCust.data.customers.length === 0) {
+          throw new Error('Customer exists but could not be found by email search.');
+        }
+        
+        shopifyCustomerId = existingCust.data.customers[0].id;
         console.log(`Found existing Shopify customer with ID: ${shopifyCustomerId}`);
+        
       } else {
-        throw error; // Re-throw other errors
+        // Log detailed error info for debugging
+        console.error('Shopify API Error:', {
+          status: error.response?.status,
+          data: error.response?.data,
+          message: error.message
+        });
+        throw error;
       }
     }
 
     // STEP 2: Store the link and user data in Firestore
-    const userDocRef = db.collection('users').doc(uid); // Use Firebase UID as document ID
+    const userDocRef = db.collection('users').doc(uid);
     await userDocRef.set({
       name: name,
       email: email,
-      shopifyCustomerId: shopifyCustomerId, // The crucial link!
+      shopifyCustomerId: String(shopifyCustomerId), // Ensure it's a string
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
+      lastSyncedAt: admin.firestore.FieldValue.serverTimestamp()
+    }, { merge: true }); // Use merge to avoid overwriting existing data
+    
     console.log(`Stored user data in Firestore for UID: ${uid}`);
 
     // STEP 3: Return the Shopify ID to the client
@@ -489,12 +547,19 @@ router.post('/create-and-sync-user', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('FATAL SYNC ERROR:', error.message);
-    res.status(500).json({ success: false, error: 'Failed to sync user.' });
+    console.error('FATAL SYNC ERROR:', error.message, error.stack);
+    
+    // Return more specific error messages
+    const statusCode = error.response?.status || 500;
+    const errorMessage = error.response?.data?.errors || error.message || 'Failed to sync user';
+    
+    res.status(statusCode).json({ 
+      success: false, 
+      error: 'Failed to sync user.',
+      details: process.env.NODE_ENV === 'development' ? errorMessage : undefined
+    });
   }
 });
-
-
 // GET /customers - Retrieve all customers with pagination
 router.get("/customers", async (req, res) => {
   const { 

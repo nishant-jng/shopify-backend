@@ -28,4 +28,4 @@ const db = admin.firestore();
 console.log("Firebase initialized and Firestore instance is ready.");
 
 // ✅ Export the db object so other files can import it
-module.exports = { db };
+module.exports = { admin,db };
