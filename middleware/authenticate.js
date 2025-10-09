@@ -1,6 +1,7 @@
 // middleware/authenticate.js
 
 const admin = require('firebase-admin');
+const crypto = require('crypto');
 
 /**
  * Authentication Middleware for Shared Backend
@@ -192,7 +193,7 @@ const authenticateShopifyWebhook = (req, res, next) => {
     });
   }
 
-  const crypto = require('crypto');
+  
   const hash = crypto
     .createHmac('sha256', SHOPIFY_APP_SECRET)
     .update(req.body, 'utf8')
@@ -214,23 +215,48 @@ const authenticateShopifyWebhook = (req, res, next) => {
   next();
 };
 
-const authenticateShopifyProxy = (req, res, next) => {
-  const crypto = require('crypto');
-  const { 'x-shopify-hmac-sha256': hmacHeader, 'x-shopify-shop-domain': shopDomain } = req.headers;
+const crypto = require('crypto');
 
-  // Extract raw query string (Shopify signs this)
-  const rawQuery = req.originalUrl.split('?')[1] || '';
+const authenticateShopifyProxy = (req, res, next) => {
+  const { 'x-shopify-hmac-sha256': hmacHeader, 'x-shopify-shop-domain': shopDomain } = req.headers;
   
-  // Generate expected HMAC using your App Secret
+  if (!hmacHeader) {
+    console.warn('❌ Missing App Proxy HMAC header');
+    return res.status(403).json({ success: false, error: 'Missing proxy signature' });
+  }
+
+  if (!shopDomain) {
+    console.warn('❌ Missing shop domain header');
+    return res.status(403).json({ success: false, error: 'Missing shop domain' });
+  }
+
+  // Use URLSearchParams for robust query string handling
+  const params = { ...req.query };
+  
+  // The 'signature' param must be removed from the query object before hashing
+  delete params.signature;
+
+  const searchParams = new URLSearchParams(params);
+  
+  // URLSearchParams automatically sorts the parameters by key, which is required by Shopify
+  const queryString = searchParams.toString();
+  
+  // Generate the expected HMAC
   const generatedHmac = crypto
-    .createHmac('sha256', SHOPIFY_APP_SECRET)
-    .update(rawQuery, 'utf8')
+    .createHmac('sha256', process.env.SHOPIFY_APP_SECRET)
+    .update(queryString, 'utf8')
     .digest('base64');
 
+  // Compare the generated HMAC with the one from the header
   if (generatedHmac !== hmacHeader) {
     console.warn('❌ Invalid App Proxy HMAC');
+    console.log('Expected:', generatedHmac);
+    console.log('Received:', hmacHeader);
+    console.log('Query String Used:', queryString);
     return res.status(403).json({ success: false, error: 'Invalid proxy signature' });
   }
+
+  console.log('✅ App Proxy authenticated for shop:', shopDomain);
 
   req.shopify = {
     shop: shopDomain,
@@ -240,6 +266,7 @@ const authenticateShopifyProxy = (req, res, next) => {
 
   next();
 };
+
 
 module.exports = {
   authenticate,

@@ -562,7 +562,7 @@ router.post('/create-and-sync-user',authenticate, async (req, res) => {
   }
 });
 // GET /customers - Retrieve all customers with pagination
-router.get("/customers", authenticateShopifyProxy,async (req, res) => {
+router.get("/all", authenticateShopifyProxy, async (req, res) => {
   const { 
     limit = 50,
     startAfter, 
@@ -593,11 +593,10 @@ router.get("/customers", authenticateShopifyProxy,async (req, res) => {
     query = query.orderBy(sortBy, sortOrder);
 
     // Apply pagination
-    const limitNum = Math.min(parseInt(limit), 100); // Max 100 per page
+    const limitNum = Math.min(parseInt(limit), 100);
     query = query.limit(limitNum);
 
     if (startAfter) {
-      // For pagination, we need to get the document to start after
       const startAfterDoc = await db.collection('customers').doc(startAfter).get();
       if (startAfterDoc.exists) {
         query = query.startAfter(startAfterDoc);
@@ -621,7 +620,6 @@ router.get("/customers", authenticateShopifyProxy,async (req, res) => {
         createdAt: data.createdAt || '',
         updatedAt: data.updatedAt || '',
         tags: data.tags || [],
-        // Custom fields
         customerName: data.customerName || '',
         businessName: data.businessName || '',
         role: data.role || '',
@@ -637,7 +635,6 @@ router.get("/customers", authenticateShopifyProxy,async (req, res) => {
       lastDocId = doc.id;
     });
 
-    // Check if there are more documents
     const hasNextPage = customers.length === limitNum;
 
     res.json({
