@@ -4,6 +4,7 @@ const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber');
 const { admin, db } = require("../firebaseConfig.js");
 const router = express.Router();
 const axios = require("axios");
+const {authenticate,authenticateShopifyProxy} = require("../middleware/authenticate.js");
 
 // Initialize phone number utility
 const phoneUtil = PhoneNumberUtil.getInstance();
@@ -112,7 +113,7 @@ const countryToPhoneCode = {
   'Other': 'US' // Default to US format for 'Other'
 };
 
-router.post("/", async (req, res) => {
+router.post("/", authenticate, async (req, res) => {
   const { 
     customerId, 
     customer_name,
@@ -400,7 +401,7 @@ router.post("/", async (req, res) => {
 });
 
 // GET /customer/:customerId - Retrieve specific customer data
-router.get("/customer/:customerId", async (req, res) => {
+router.get("/customer/:customerId",authenticate, async (req, res) => {
   const { customerId } = req.params;
 
   if (!customerId) {
@@ -450,7 +451,7 @@ router.get("/customer/:customerId", async (req, res) => {
 
 
 // The new, all-in-one endpoint
-router.post('/create-and-sync-user', async (req, res) => {
+router.post('/create-and-sync-user',authenticate, async (req, res) => {
   const { uid, email, name } = req.body;
 
   // Enhanced validation
@@ -561,9 +562,9 @@ router.post('/create-and-sync-user', async (req, res) => {
   }
 });
 // GET /customers - Retrieve all customers with pagination
-router.get("/customers", async (req, res) => {
+router.get("/customers", authenticateShopifyProxy,async (req, res) => {
   const { 
-    limit = 50, 
+    limit = 50,
     startAfter, 
     role, 
     isVerified,
@@ -661,7 +662,7 @@ router.get("/customers", async (req, res) => {
 });
 
 // POST /verify - Update customer verification status
-router.post("/verify", async (req, res) => {
+router.post("/verify",authenticate, async (req, res) => {
   const { customerId, isVerified } = req.body;
 
   // Input Validation
@@ -796,7 +797,7 @@ router.post("/verify", async (req, res) => {
   }
 });
 // DELETE /customer/:customerId - Delete a customer (optional endpoint)
-router.delete("/customer/:customerId", async (req, res) => {
+router.delete("/customer/:customerId",authenticate, async (req, res) => {
   const { customerId } = req.params;
 
   if (!customerId) {

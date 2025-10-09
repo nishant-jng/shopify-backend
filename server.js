@@ -2,9 +2,8 @@ const dotenv = require("dotenv");
 dotenv.config();
 const express = require("express");
 const cors = require("cors");
+
 // const admin = require("firebase-admin");
-
-
 
 // --- Import modular routes ---
 const updateCustomerRoutes = require('./routes/updateCustomer');
@@ -12,12 +11,11 @@ const aiSearchRoutes = require('./routes/aiSearch');
 const updateCustomerWishlistRoutes = require('./routes/updateCustomerWishlist');
 const getCustomerWishListRoutes = require('./routes/getCustomerWishlist');
 const customerListsRoutes = require('./routes/customerLists');
-const shareListRoutes = require('./routes/shareList');
+const shareListRoutes = require('./routes/shareList'); 
 const customers = require('./routes/customers');
 
 
-
-
+ 
 // --- Environment Variable Validation ---
 const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, GEMINI_API_KEY, PORT = 3000 } = process.env;
 
@@ -33,10 +31,16 @@ if (!GEMINI_API_KEY) {
 
 // --- App Initialization & Middleware ---
 const app = express();
-
 app.set('trust proxy', 1); // Trust first proxy, adjust if needed
 app.use(express.json()); // Middleware to parse JSON bodies
-app.use(cors());         // Middleware to enable CORS
+
+const allowedOrigins = [
+  "https://jn-global.myshopify.com",  // Shopify domain
+  "https://jnitin.com/"               // Custom domain (if you have one)
+];
+
+app.use(cors({ origin: allowedOrigins }));
+// Middleware to enable CORS
 
 // --- Route Mounting ---
 // All requests to /update-customer-metafields will be handled by updateCustomerRoutes
@@ -58,7 +62,7 @@ app.get("/health", (req, res) => {
     status: "healthy",
     timestamp: new Date().toISOString(),
     shopify_store: SHOPIFY_STORE ? "configured" : "not configured"
-  });
+  }); 
 });
 
 // --- Server Startup ---
