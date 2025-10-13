@@ -266,6 +266,65 @@ const authenticateShopifyProxy = (req, res, next) => {
   next();
 };
 
+const authenticateManualHmac = (req, res, next) => {
+  const { ts, hmac } = req.query;
+  
+  // Check if timestamp and HMAC are provided
+  if (!ts || !hmac) {
+    console.warn('❌ Missing timestamp or HMAC in query parameters');
+    return res.status(403).json({ 
+      success: false, 
+      error: 'Missing authentication parameters' 
+    });
+  }
+
+  // Optional: Validate timestamp to prevent replay attacks (5 minute window)
+  const currentTime = Date.now();
+  const requestTime = parseInt(ts, 10);
+  const timeDifference = Math.abs(currentTime - requestTime);
+  const maxTimeDifference = 5 * 60 * 1000; // 5 minutes in milliseconds
+
+  if (timeDifference > maxTimeDifference) {
+    console.warn('❌ Request timestamp expired');
+    return res.status(403).json({ 
+      success: false, 
+      error: 'Request expired' 
+    });
+  }
+
+  // Create the message from timestamp (matching your Liquid code)
+  const message = `${ts}`;
+  
+  // Generate the expected HMAC using your shared secret
+  const expectedHmac = crypto
+    .createHmac('sha256', process.env.SHARED_SECRET || 'YOUR_SHARED_SECRET')
+    .update(message, 'utf8')
+    .digest('hex');
+
+  // Compare HMACs (case-insensitive comparison)
+  if (expectedHmac.toLowerCase() !== hmac.toLowerCase()) {
+    console.warn('❌ Invalid HMAC signature');
+    console.log('Expected:', expectedHmac);
+    console.log('Received:', hmac);
+    console.log('Timestamp:', ts);
+    return res.status(403).json({ 
+      success: false, 
+      error: 'Invalid signature' 
+    });
+  }
+
+  console.log('✅ Manual HMAC authenticated successfully');
+
+  // Attach verification info to request
+  req.shopify = {
+    verified: true,
+    source: 'manual-hmac',
+    timestamp: requestTime
+  };
+
+  next();
+};
+
 
 module.exports = {
   authenticate,
@@ -273,5 +332,6 @@ module.exports = {
   authenticateFlutter,
   authenticateShopifyProxy,
   authenticateShopifyWebhook,
+  authenticateManualHmac,
   rateLimitByClient
 }; 

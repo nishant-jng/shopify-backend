@@ -4,7 +4,7 @@ const { PhoneNumberUtil, PhoneNumberFormat } = require('google-libphonenumber');
 const { admin, db } = require("../firebaseConfig.js");
 const router = express.Router();
 const axios = require("axios");
-const {authenticate,authenticateShopifyProxy} = require("../middleware/authenticate.js");
+const {authenticate,authenticateShopifyProxy,authenticateManualHmac} = require("../middleware/authenticate.js");
 
 // Initialize phone number utility
 const phoneUtil = PhoneNumberUtil.getInstance();
@@ -562,7 +562,7 @@ router.post('/create-and-sync-user',authenticate, async (req, res) => {
   }
 });
 // GET /customers - Retrieve all customers with pagination
-router.get("/all", authenticateShopifyProxy, async (req, res) => {
+router.get("/all", authenticateManualHmac, async (req, res) => {
   const { 
     limit = 50,
     startAfter, 

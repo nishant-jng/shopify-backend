@@ -115,8 +115,8 @@ app.use(cors({ origin: allowedOrigins }));
 
 // --- App Proxy Routes (must be mounted at /apps/proxy) ---
 // These routes are accessed via: yourstore.myshopify.com/apps/proxy/...
-app.use("/proxy/customers", customers);
-
+// app.use("/proxy/customers", customers);
+app.use("customers", customers);
 // --- Regular API Routes (non-proxy) ---
 app.use("/update-customer-metafields", updateCustomerRoutes);
 app.use("/ai-search", aiSearchRoutes);
@@ -134,17 +134,17 @@ app.get("/health", (req, res) => {
   }); 
 });
 
-// --- 404 Handler for debugging ---
-app.use((req, res) => {
-  console.log('❌ 404 - Route not found:', req.method, req.originalUrl);
-  console.log('Headers:', JSON.stringify(req.headers, null, 2));
-  res.status(404).json({ 
-    success: false, 
-    error: 'Route not found',
-    path: req.originalUrl,
-    method: req.method
-  });
-});
+// // --- 404 Handler for debugging ---
+// app.use((req, res) => {
+//   console.log('❌ 404 - Route not found:', req.method, req.originalUrl);
+//   console.log('Headers:', JSON.stringify(req.headers, null, 2));
+//   res.status(404).json({ 
+//     success: false, 
+//     error: 'Route not found',
+//     path: req.originalUrl,
+//     method: req.method
+//   });
+// });
 
 // --- Server Startup ---
 app.listen(PORT, () => {
