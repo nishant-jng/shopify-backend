@@ -113,7 +113,7 @@ const countryToPhoneCode = {
   'Other': 'US' // Default to US format for 'Other'
 };
 
-router.post("/", authenticate, async (req, res) => {
+router.post("/", async (req, res) => {
   const { 
     customerId, 
     customer_name,
@@ -401,7 +401,7 @@ router.post("/", authenticate, async (req, res) => {
 });
 
 // GET /customer/:customerId - Retrieve specific customer data
-router.get("/customer/:customerId",authenticate, async (req, res) => {
+router.get("/customer/:customerId",async (req, res) => {
   const { customerId } = req.params;
 
   if (!customerId) {
@@ -451,7 +451,7 @@ router.get("/customer/:customerId",authenticate, async (req, res) => {
 
 
 // The new, all-in-one endpoint
-router.post('/create-and-sync-user',authenticate, async (req, res) => {
+router.post('/create-and-sync-user',async (req, res) => {
   const { uid, email, name } = req.body;
 
   // Enhanced validation
@@ -659,7 +659,7 @@ router.get("/all", authenticateManualHmac, async (req, res) => {
 });
 
 // POST /verify - Update customer verification status
-router.post("/verify",authenticate, async (req, res) => {
+router.post("/verify",authenticateManualHmac, async (req, res) => {
   const { customerId, isVerified } = req.body;
 
   // Input Validation
