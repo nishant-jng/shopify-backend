@@ -108,10 +108,26 @@ app.use(express.json());
 const allowedOrigins = [
   "https://jn-global.myshopify.com",
   "https://jnitin.com",
-  "https://www.jnitin.com"
+  "https://www.jnitin.com",
 ];
 
-app.use(cors({ origin: allowedOrigins }));
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true); // allow non-browser tools (e.g. Postman)
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        console.log(`🚫 CORS blocked origin: ${origin}`);
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
 
 // --- App Proxy Routes (must be mounted at /apps/proxy) ---
 // These routes are accessed via: yourstore.myshopify.com/apps/proxy/...
