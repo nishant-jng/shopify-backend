@@ -1142,48 +1142,64 @@ router.get("/customer/:customerId/performance", async (req, res) => {
       });
     }
 
-    const headers = jsonData[0];
+    // const headers = jsonData[0];
     const rows = jsonData.slice(1);
 
-    const parsedData = rows.map((row) => {
-      const obj = {};
-      headers.forEach((header, index) => {
-        obj[header] = row[index] !== undefined ? row[index] : "";
-      });
-      return obj;
-    });
+   // Clean and normalize headers
+const headers = jsonData[0].map(h =>
+  h?.toString().trim().replace(/\u00A0/g, " ")
+);
 
-    const summary = {
-      totalRows: parsedData.length,
-      totalOpenPos: parsedData.reduce(
-        (sum, row) => sum + (parseFloat(row["Open Pos"]) || 0),
-        0
-      ),
-      totalOrders: parsedData.reduce(
-        (sum, row) => sum + (parseFloat(row["Total orders"]) || 0),
-        0
-      ),
-      totalOTIF: parsedData.reduce(
-        (sum, row) => sum + (parseFloat(row["OTIF"]) || 0),
-        0
-      ),
-      totalQualityClaimsLY: parsedData.reduce(
-        (sum, row) => sum + (parseFloat(row["Quality Claims LY"]) || 0),
-        0
-      ),
-      totalQualityClaims: parsedData.reduce(
-        (sum, row) => sum + (parseFloat(row["Quality Claims"]) || 0),
-        0
-      ),
-      totalSKUs: parsedData.reduce(
-        (sum, row) => sum + (parseFloat(row["Total SKUs"]) || 0),
-        0
-      ),
-      totalConvertedSKUs: parsedData.reduce(
-        (sum, row) => sum + (parseFloat(row["Converted SKUs"]) || 0),
-        0
-      ),
-    };
+// Helper to safely parse numbers
+const cleanNumber = (val) => {
+  if (typeof val === "number") return val;
+  if (typeof val === "string") {
+    const cleaned = val.replace(/[^0-9.\-]/g, "");
+    return cleaned ? parseFloat(cleaned) : 0;
+  }
+  return 0;
+};
+
+const parsedData = rows.map((row) => {
+  const obj = {};
+  headers.forEach((header, index) => {
+    obj[header] = row[index] !== undefined ? row[index] : "";
+  });
+  return obj;
+});
+
+const summary = {
+  totalRows: parsedData.length,
+  totalOpenPos: parsedData.reduce(
+    (sum, row) => sum + cleanNumber(row["Open Pos"]),
+    0
+  ),
+  totalOrders: parsedData.reduce(
+    (sum, row) => sum + cleanNumber(row["Total orders"]),
+    0
+  ),
+  totalOTIF: parsedData.reduce(
+    (sum, row) => sum + cleanNumber(row["OTIF"]),
+    0
+  ),
+  totalQualityClaimsLY: parsedData.reduce(
+    (sum, row) => sum + cleanNumber(row["Quality Claims LY"]),
+    0
+  ),
+  totalQualityClaims: parsedData.reduce(
+    (sum, row) => sum + cleanNumber(row["Quality Claims"]),
+    0
+  ),
+  totalSKUs: parsedData.reduce(
+    (sum, row) => sum + cleanNumber(row["Total SKUs"]),
+    0
+  ),
+  totalConvertedSKUs: parsedData.reduce(
+    (sum, row) => sum + cleanNumber(row["Converted SKUs"]),
+    0
+  ),
+};
+
 
     res.json({
       success: true,
