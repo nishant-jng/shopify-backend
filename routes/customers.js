@@ -1228,6 +1228,218 @@ const summary = {
 });
 
 
+router.get("/volume-shipped-ytd", async (req, res) => {
+  try {
+    const query = `
+      query getShopMetafield {
+        shop {
+          metafield(namespace: "custom", key: "volumeshippedytd") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query },
+    });
+
+    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Excel file not found",
+        details: "No volumeshippedytd metafield found",
+      });
+    }
+
+    let fileUrl;
+
+    // Case 1: metafield type is file_reference
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile {
+              url
+            }
+            ... on MediaImage {
+              image {
+                url
+              }
+            }
+          }
+        }
+      `;
+
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+      });
+
+      fileUrl =
+        fileResponse.data?.data?.node?.url ||
+        fileResponse.data?.data?.node?.image?.url;
+
+      if (!fileUrl) {
+        return res.status(404).json({
+          error: "File URL not found",
+          details: "Could not resolve file reference metafield",
+        });
+      }
+    } else {
+      // Case 2: direct URL stored as value
+      fileUrl = metafieldData.value;
+    }
+
+    // Download the file
+    const fileResponse = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "arraybuffer",
+    });
+
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+    });
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({
+        error: "Empty file",
+        details: "The Excel file contains no data",
+      });
+    }
+
+    // Clean and normalize headers (months)
+    const headers = jsonData[0].map((h) =>
+      h?.toString().trim().replace(/\u00A0/g, " ")
+    );
+
+    const rows = jsonData.slice(1);
+
+    // Helper to safely parse numbers
+    const cleanNumber = (val) => {
+      if (typeof val === "number") return val;
+      if (typeof val === "string") {
+        const cleaned = val.replace(/[^0-9.\-]/g, "");
+        return cleaned ? parseFloat(cleaned) : 0;
+      }
+      return 0;
+    };
+
+    // Parse data rows
+    const parsedData = rows.map((row) => {
+      const obj = {
+        buyer: row[0] || "",
+        vendor: row[1] || "",
+      };
+
+      // Map month columns (starting from index 2)
+      headers.slice(2).forEach((month, index) => {
+        obj[month] = cleanNumber(row[index + 2]);
+      });
+
+      return obj;
+    });
+
+    // Calculate summary statistics
+    const monthColumns = headers.slice(2); // All month columns
+    const summary = {
+      totalRows: parsedData.length,
+      totalsByMonth: {},
+      totalsByBuyer: {},
+      totalsByVendor: {},
+      grandTotal: 0,
+    };
+
+    // Calculate totals by month
+    monthColumns.forEach((month) => {
+      summary.totalsByMonth[month] = parsedData.reduce(
+        (sum, row) => sum + (row[month] || 0),
+        0
+      );
+    });
+
+    // Calculate totals by buyer
+    parsedData.forEach((row) => {
+      if (row.buyer) {
+        if (!summary.totalsByBuyer[row.buyer]) {
+          summary.totalsByBuyer[row.buyer] = 0;
+        }
+        monthColumns.forEach((month) => {
+          summary.totalsByBuyer[row.buyer] += row[month] || 0;
+        });
+      }
+    });
+
+    // Calculate totals by vendor
+    parsedData.forEach((row) => {
+      if (row.vendor) {
+        if (!summary.totalsByVendor[row.vendor]) {
+          summary.totalsByVendor[row.vendor] = 0;
+        }
+        monthColumns.forEach((month) => {
+          summary.totalsByVendor[row.vendor] += row[month] || 0;
+        });
+      }
+    });
+
+    // Calculate grand total
+    summary.grandTotal = Object.values(summary.totalsByMonth).reduce(
+      (sum, val) => sum + val,
+      0
+    );
+
+    res.json({
+      success: true,
+      data: {
+        headers,
+        rows: parsedData,
+        summary,
+        rowCount: parsedData.length,
+        months: monthColumns,
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching/parsing Excel file:", err.message);
+
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: "File not found",
+        details: "The Excel file URL is not accessible",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message || "An unexpected error occurred",
+    });
+  }
+});
+
 
 // Export the router to be used in server.js
 module.exports = router;
