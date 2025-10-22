@@ -1232,6 +1232,51 @@ const XLSX = require("xlsx");
 
 router.get("/volume-shipped-ytd", async (req, res) => {
   try {
+    // Get customer ID from request (adjust based on your auth setup)
+    const customerId = req.customerId; // or req.query.customerId, req.session.customerId, etc.
+
+    if (!customerId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        details: "Customer ID is required"
+      });
+    }
+
+    // Fetch customer's buyers metafield
+    const customerQuery = `
+      query getCustomerBuyers($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          metafield(namespace: "custom", key: "buyers") {
+            value
+          }
+        }
+      }
+    `;
+
+    const customerResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { 
+        query: customerQuery, 
+        variables: { customerId: `gid://shopify/Customer/${customerId}` }
+      },
+    });
+
+    const customerBuyersValue = customerResponse.data?.data?.customer?.metafield?.value;
+    
+    // Parse the buyers list (assuming comma-separated values)
+    const allowedBuyers = customerBuyersValue 
+      ? customerBuyersValue.split(',').map(b => b.trim()).filter(b => b)
+      : [];
+
+    console.log("Customer allowed buyers:", allowedBuyers);
+
+    // Fetch shop metafield for Excel file
     const query = `
       query getShopMetafield {
         shop {
@@ -1320,6 +1365,7 @@ router.get("/volume-shipped-ytd", async (req, res) => {
     });
 
     // Parse Excel file
+    const XLSX = require("xlsx");
     const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
@@ -1333,7 +1379,7 @@ router.get("/volume-shipped-ytd", async (req, res) => {
       header: 1,
       defval: "",
       blankrows: false,
-      raw: false, // Convert all values to strings first
+      raw: false,
     });
 
     console.log("=== DEBUG INFO ===");
@@ -1405,10 +1451,37 @@ router.get("/volume-shipped-ytd", async (req, res) => {
       return obj;
     });
 
-    // Calculate summary statistics
-    const monthColumns = headers.slice(2); // All month columns
+    // FILTER DATA BY CUSTOMER'S ALLOWED BUYERS
+    const filteredData = allowedBuyers.length > 0
+      ? parsedData.filter(row => allowedBuyers.includes(row.buyer))
+      : parsedData; // If no buyers specified, return all data
+
+    console.log("Filtered data rows:", filteredData.length);
+
+    if (filteredData.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          headers,
+          rows: [],
+          summary: {
+            totalRows: 0,
+            totalsByMonth: {},
+            totalsByBuyer: {},
+            totalsByVendor: {},
+            grandTotal: 0,
+          },
+          rowCount: 0,
+          months: headers.slice(2),
+        },
+        message: "No data available for your assigned buyers"
+      });
+    }
+
+    // Calculate summary statistics BASED ON FILTERED DATA
+    const monthColumns = headers.slice(2);
     const summary = {
-      totalRows: parsedData.length,
+      totalRows: filteredData.length,
       totalsByMonth: {},
       totalsByBuyer: {},
       totalsByVendor: {},
@@ -1417,14 +1490,14 @@ router.get("/volume-shipped-ytd", async (req, res) => {
 
     // Calculate totals by month
     monthColumns.forEach((month) => {
-      summary.totalsByMonth[month] = parsedData.reduce(
+      summary.totalsByMonth[month] = filteredData.reduce(
         (sum, row) => sum + (row[month] || 0),
         0
       );
     });
 
     // Calculate totals by buyer
-    parsedData.forEach((row) => {
+    filteredData.forEach((row) => {
       if (row.buyer) {
         if (!summary.totalsByBuyer[row.buyer]) {
           summary.totalsByBuyer[row.buyer] = 0;
@@ -1436,7 +1509,7 @@ router.get("/volume-shipped-ytd", async (req, res) => {
     });
 
     // Calculate totals by vendor
-    parsedData.forEach((row) => {
+    filteredData.forEach((row) => {
       if (row.vendor) {
         if (!summary.totalsByVendor[row.vendor]) {
           summary.totalsByVendor[row.vendor] = 0;
@@ -1457,11 +1530,12 @@ router.get("/volume-shipped-ytd", async (req, res) => {
       success: true,
       data: {
         headers,
-        rows: parsedData,
+        rows: filteredData,
         summary,
-        rowCount: parsedData.length,
+        rowCount: filteredData.length,
         months: monthColumns,
       },
+      customerBuyers: allowedBuyers, // Include for debugging
     });
   } catch (err) {
     console.error("Error fetching/parsing Excel file:", err.message);
