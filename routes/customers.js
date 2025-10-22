@@ -1230,10 +1230,10 @@ const summary = {
 
 const XLSX = require("xlsx");
 
-router.get("/volume-shipped-ytd", async (req, res) => {
+router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
   try {
     // Get customer ID from request (adjust based on your auth setup)
-    const customerId = req.customerId; // or req.query.customerId, req.session.customerId, etc.
+    const { customerId } = req.params; // or req.query.customerId, req.session.customerId, etc.
 
     if (!customerId) {
       return res.status(401).json({
