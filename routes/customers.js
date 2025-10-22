@@ -1252,12 +1252,15 @@ router.get("/volume-shipped-ytd", async (req, res) => {
       data: { query },
     });
 
+    console.log("Shopify Response:", JSON.stringify(shopifyResponse.data, null, 2));
+
     const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
 
     if (!metafieldData) {
       return res.status(404).json({
         error: "Excel file not found",
         details: "No volumeshippedytd metafield found",
+        debugInfo: shopifyResponse.data
       });
     }
 
@@ -1425,6 +1428,7 @@ router.get("/volume-shipped-ytd", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching/parsing Excel file:", err.message);
+    console.error("Full error:", err);
 
     if (err.response?.status === 404) {
       return res.status(404).json({
@@ -1439,7 +1443,5 @@ router.get("/volume-shipped-ytd", async (req, res) => {
     });
   }
 });
-
-
 // Export the router to be used in server.js
 module.exports = router;
