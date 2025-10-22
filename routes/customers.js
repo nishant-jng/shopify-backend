@@ -1228,6 +1228,8 @@ const summary = {
 });
 
 
+const XLSX = require("xlsx");
+
 router.get("/volume-shipped-ytd", async (req, res) => {
   try {
     const query = `
@@ -1317,17 +1319,27 @@ router.get("/volume-shipped-ytd", async (req, res) => {
       responseType: "arraybuffer",
     });
 
-    const XLSX = require("xlsx");
+    // Parse Excel file
     const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
-
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
 
+    // Get the range for debugging
+    const range = XLSX.utils.decode_range(worksheet['!ref']);
+    console.log("Sheet range:", range);
+
+    // Convert to JSON array format
     const jsonData = XLSX.utils.sheet_to_json(worksheet, {
       header: 1,
       defval: "",
       blankrows: false,
+      raw: false, // Convert all values to strings first
     });
+
+    console.log("=== DEBUG INFO ===");
+    console.log("Total rows read:", jsonData.length);
+    console.log("First 3 rows:", JSON.stringify(jsonData.slice(0, 3), null, 2));
+    console.log("==================");
 
     if (jsonData.length === 0) {
       return res.status(404).json({
@@ -1336,15 +1348,40 @@ router.get("/volume-shipped-ytd", async (req, res) => {
       });
     }
 
-    // Clean and normalize headers (months)
-    const headers = jsonData[0].map((h) =>
-      h?.toString().trim().replace(/\u00A0/g, " ")
+    // Find the first non-empty row (header row)
+    let headerRowIndex = 0;
+    for (let i = 0; i < jsonData.length; i++) {
+      if (jsonData[i] && jsonData[i].length > 0 && jsonData[i][0]) {
+        headerRowIndex = i;
+        break;
+      }
+    }
+
+    // Clean and normalize headers
+    const headers = jsonData[headerRowIndex].map((h) =>
+      h?.toString().trim().replace(/\u00A0/g, " ").replace(/\s+/g, " ")
     );
 
-    const rows = jsonData.slice(1);
+    console.log("Headers found:", headers);
+
+    // Get data rows (skip header and filter empty rows)
+    const rows = jsonData.slice(headerRowIndex + 1).filter(row => 
+      row && row.length > 0 && (row[0] || row[1])
+    );
+
+    console.log("Number of data rows:", rows.length);
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        error: "No data rows found",
+        details: "The Excel file contains headers but no data rows",
+        headers: headers,
+      });
+    }
 
     // Helper to safely parse numbers
     const cleanNumber = (val) => {
+      if (val === null || val === undefined || val === "") return 0;
       if (typeof val === "number") return val;
       if (typeof val === "string") {
         const cleaned = val.replace(/[^0-9.\-]/g, "");
@@ -1356,8 +1393,8 @@ router.get("/volume-shipped-ytd", async (req, res) => {
     // Parse data rows
     const parsedData = rows.map((row) => {
       const obj = {
-        buyer: row[0] || "",
-        vendor: row[1] || "",
+        buyer: row[0]?.toString().trim() || "",
+        vendor: row[1]?.toString().trim() || "",
       };
 
       // Map month columns (starting from index 2)
@@ -1440,6 +1477,7 @@ router.get("/volume-shipped-ytd", async (req, res) => {
     return res.status(500).json({
       error: "Failed to fetch or parse Excel file",
       details: err.message || "An unexpected error occurred",
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
     });
   }
 });
