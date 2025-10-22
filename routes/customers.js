@@ -1235,7 +1235,7 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
     // Get customer ID from request (adjust based on your auth setup)
     const { customerId } = req.params; // or req.query.customerId, req.session.customerId, etc.
 
-    if (!customerId) {
+   if (!customerId) {
       return res.status(401).json({
         error: "Unauthorized",
         details: "Customer ID is required"
@@ -1269,12 +1269,27 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
 
     const customerBuyersValue = customerResponse.data?.data?.customer?.metafield?.value;
     
-    // Parse the buyers list (assuming comma-separated values)
-    const allowedBuyers = customerBuyersValue 
-      ? customerBuyersValue.split(',').map(b => b.trim()).filter(b => b)
-      : [];
+    // Parse the buyers list
+    let allowedBuyers = [];
+    if (customerBuyersValue) {
+      try {
+        // Try parsing as JSON first (for list metafield type)
+        const parsed = JSON.parse(customerBuyersValue);
+        allowedBuyers = Array.isArray(parsed) 
+          ? parsed.map(b => b.trim().toUpperCase()).filter(b => b)
+          : [customerBuyersValue.trim().toUpperCase()];
+      } catch (e) {
+        // If not JSON, treat as comma-separated string
+        allowedBuyers = customerBuyersValue
+          .split(',')
+          .map(b => b.trim().toUpperCase())
+          .filter(b => b);
+      }
+    }
 
-    console.log("Customer allowed buyers:", allowedBuyers);
+    console.log("Customer ID:", customerId);
+    console.log("Raw customer buyers value:", customerBuyersValue);
+    console.log("Customer allowed buyers (normalized):", allowedBuyers);
 
     // Fetch shop metafield for Excel file
     const query = `
@@ -1439,7 +1454,7 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
     // Parse data rows
     const parsedData = rows.map((row) => {
       const obj = {
-        buyer: row[0]?.toString().trim() || "",
+        buyer: row[0]?.toString().trim().toUpperCase() || "", // Convert to uppercase
         vendor: row[1]?.toString().trim() || "",
       };
 
@@ -1456,9 +1471,10 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
       ? parsedData.filter(row => allowedBuyers.includes(row.buyer))
       : parsedData; // If no buyers specified, return all data
 
+    console.log("Total parsed rows:", parsedData.length);
     console.log("Filtered data rows:", filteredData.length);
 
-    if (filteredData.length === 0) {
+    if (filteredData.length === 0 && allowedBuyers.length > 0) {
       return res.json({
         success: true,
         data: {
@@ -1474,7 +1490,8 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
           rowCount: 0,
           months: headers.slice(2),
         },
-        message: "No data available for your assigned buyers"
+        message: "No data available for your assigned buyers",
+        customerBuyers: allowedBuyers
       });
     }
 
@@ -1535,7 +1552,7 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
         rowCount: filteredData.length,
         months: monthColumns,
       },
-      customerBuyers: allowedBuyers, // Include for debugging
+      customerBuyers: allowedBuyers, // Include for debugging/transparency
     });
   } catch (err) {
     console.error("Error fetching/parsing Excel file:", err.message);
