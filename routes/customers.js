@@ -1217,30 +1217,25 @@ router.get("/customer/:customerId/merchant-performance", async (req, res) => {
       });
     }
 
-    // Calculate summary from customer's row
+    // Return data in original format with only the matched customer's row
     const summary = {
-      name: customerData["Name"] || "",
-      email: customerData["Email"] || "",
-      volumeLY25: cleanCurrency(customerData["Volume LY25"]),
-      targetFY26: cleanCurrency(customerData["Target FY26"]),
-      ytdFY26: cleanCurrency(customerData["YTD FY26"]),
-      openPos: cleanCurrency(customerData["Open Pos"]),
+      totalRows: 1,
+      totalOpenPos: cleanCurrency(customerData["Open Pos"]),
       totalOrders: cleanNumber(customerData["Total orders"]),
-      otif: cleanNumber(customerData["OTIF"]),
-      qualityClaimsLY: cleanNumber(customerData["Quality Claims LY"]),
-      qualityClaims: cleanNumber(customerData["Quality Claims"]),
+      totalOTIF: cleanNumber(customerData["OTIF"]),
+      totalQualityClaimsLY: cleanNumber(customerData["Quality Claims LY"]),
+      totalQualityClaims: cleanNumber(customerData["Quality Claims"]),
       totalSKUs: cleanNumber(customerData["Total SKUs"]),
-      convertedSKUs: cleanNumber(customerData["Converted SKUs"]),
+      totalConvertedSKUs: cleanNumber(customerData["Converted SKUs"]),
     };
 
     res.json({
       success: true,
       data: {
-        customerInfo: {
-          id: customerId,
-          email: customerEmail,
-        },
-        performance: summary,
+        headers,
+        rows: [customerData], // Return only the matched customer's data as an array
+        summary,
+        rowCount: 1,
       },
     });
   } catch (err) {
