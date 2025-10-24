@@ -89,7 +89,9 @@ const customers = require('./routes/customers');
 
  
 // --- Environment Variable Validation ---
-const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, GEMINI_API_KEY, PORT = 3000 } = process.env;
+const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, GEMINI_API_KEY} = process.env;
+const PORT = process.env.PORT || 8080;
+
 
 if (!SHOPIFY_STORE || !SHOPIFY_ADMIN_TOKEN) {
   console.error('Missing required Shopify environment variables: SHOPIFY_STORE and/or SHOPIFY_ADMIN_TOKEN');
