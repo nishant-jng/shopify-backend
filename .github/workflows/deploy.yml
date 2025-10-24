@@ -1,0 +1,58 @@
+name: Deploy Shopify App to Google Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy Backend to Google Cloud Run
+    runs-on: ubuntu-latest
+
+    env:
+      PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+      SERVICE: ${{ secrets.SERVICE }}
+      REPO_NAME: ${{ secrets.REPO_NAME }}
+      EMAIL_USER: ${{ secrets.EMAIL_USER }}
+      EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+      EMAIL_SERVICE: ${{ secrets.EMAIL_SERVICE }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      SHARED_SECRET: ${{ secrets.SHARED_SECRET }}
+      SHOPIFY_ADMIN_TOKEN: ${{ secrets.SHOPIFY_ADMIN_TOKEN }}
+      SHOPIFY_API_KEY: ${{ secrets.SHOPIFY_API_KEY }}
+      SHOPIFY_API_SECRET: ${{ secrets.SHOPIFY_API_SECRET }}
+      SHOPIFY_STORE: ${{ secrets.SHOPIFY_STORE }}
+      ADMIN_EMAIL: ${{ secrets.ADMIN_EMAIL }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Authenticate with Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SERVICE_KEY }}
+
+      - name: Set up Google Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Configure Docker Authentication
+        run: gcloud auth configure-docker us-central1-docker.pkg.dev --quiet
+
+      - name: Build and Push Backend Docker Image
+        run: |
+          docker build -t us-central1-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/backend:latest ./
+          docker push us-central1-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/backend:latest
+
+      - name: Deploy Backend to Cloud Run
+        run: |
+          gcloud run deploy backend-shopify-app \
+            --image us-central1-docker.pkg.dev/$PROJECT_ID/$REPO_NAME/backend:latest \
+            --region us-central1 \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars "GCP_PROJECT_ID=$PROJECT_ID,SERVICE=$SERVICE,PORT=$PORT,EMAIL_USER=$EMAIL_USER,EMAIL_PASS=$EMAIL_PASS,EMAIL_SERVICE=$EMAIL_SERVICE,GEMINI_API_KEY=$GEMINI_API_KEY,SHARED_SECRET=$SHARED_SECRET,SHOPIFY_ADMIN_TOKEN=$SHOPIFY_ADMIN_TOKEN,SHOPIFY_API_KEY=$SHOPIFY_API_KEY,SHOPIFY_API_SECRET=$SHOPIFY_API_SECRET,SHOPIFY_STORE=$SHOPIFY_STORE" \
+            --quiet
