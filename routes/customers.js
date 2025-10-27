@@ -1867,7 +1867,6 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
 
 
 router.get("/customer/:customerId/recent-pos", async (req, res) => {
-  console.log("=== ROUTE HIT ===");
   const { customerId } = req.params;
 
   if (!customerId) {
@@ -1878,6 +1877,8 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
   }
 
   try {
+    console.log("📤 Fetching metafield for customer:", customerId);
+
     // 1. Fetch the metafield
     const query = `
       query getCustomerMetafield($customerId: ID!) {
@@ -1896,8 +1897,6 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       customerId: `gid://shopify/Customer/${customerId}`,
     };
 
-    console.log("📤 Fetching metafield...");
-
     const shopifyResponse = await axios({
       method: "POST",
       url: `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
@@ -1908,29 +1907,23 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       data: { query, variables },
     });
 
-    console.log("✅ Metafield fetched successfully");
-
     const metafieldData = shopifyResponse.data?.data?.customer?.metafield;
 
     if (!metafieldData) {
-      console.log("❌ No metafield found");
       return res.status(404).json({
         error: "Recent POs Excel file not found",
         details: `No 'recentpo' metafield found for customer ${customerId}`,
       });
     }
 
-    console.log("✅ Metafield data:", metafieldData);
+    console.log("✅ Metafield found, type:", metafieldData.type);
 
     let fileUrl;
 
-    // 2. Resolve the file URL
-    console.log("📤 Starting file URL resolution...");
-    console.log("Metafield type:", metafieldData.type);
-
+    // 2. Resolve file URL
     if (metafieldData.type === "file_reference") {
       const fileId = metafieldData.value;
-      console.log("📤 Fetching file URL for fileId:", fileId);
+      console.log("📤 Resolving file URL...");
 
       const fileQuery = `
         query getFileUrl($fileId: ID!) {
@@ -1938,16 +1931,9 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
             ... on GenericFile {
               url
             }
-            ... on MediaImage {
-              image {
-                url
-              }
-            }
           }
         }
       `;
-
-      console.log("📤 Sending file query to Shopify...");
 
       const fileResponse = await axios({
         method: "POST",
@@ -1957,20 +1943,12 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
           "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
         },
         data: { query: fileQuery, variables: { fileId } },
-        timeout: 10000, // Add 10 second timeout
+        timeout: 10000,
       });
 
-      console.log("📥 File response status:", fileResponse.status);
-      console.log("📥 File response data:", JSON.stringify(fileResponse.data, null, 2));
-
-      fileUrl =
-        fileResponse.data?.data?.node?.url ||
-        fileResponse.data?.data?.node?.image?.url;
-
-      console.log("Resolved fileUrl:", fileUrl);
+      fileUrl = fileResponse.data?.data?.node?.url;
 
       if (!fileUrl) {
-        console.log("❌ File URL not found in response");
         return res.status(404).json({
           error: "File URL not found",
           details: "Could not resolve file reference metafield",
@@ -1978,41 +1956,48 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       }
     } else {
       fileUrl = metafieldData.value;
-      console.log("Using direct URL from metafield:", fileUrl);
     }
 
-    console.log("✅ File URL resolved:", fileUrl);
+    console.log("✅ File URL resolved, downloading...");
 
-    // 3. Download the Excel file
-    console.log("📤 Downloading Excel file from:", fileUrl);
-
+    // 3. Download Excel file with size limit
     const fileResponse = await axios({
       method: "GET",
       url: fileUrl,
       responseType: "arraybuffer",
-      timeout: 30000, // 30 second timeout for file download
-      maxContentLength: 50 * 1024 * 1024, // 50MB max
+      timeout: 30000,
+      maxContentLength: 10 * 1024 * 1024, // Limit to 10MB
     });
 
-    console.log("📥 File downloaded, size:", fileResponse.data.length, "bytes");
+    console.log("📥 File downloaded:", fileResponse.data.length, "bytes");
 
-    // 4. Parse the Excel file
-    console.log("📊 Parsing Excel file...");
+    // 4. Parse Excel efficiently
     const XLSX = require("xlsx");
-    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+    
+    // Use read options to reduce memory usage
+    const workbook = XLSX.read(fileResponse.data, { 
+      type: "buffer",
+      cellDates: true,
+      cellNF: false,
+      cellHTML: false
+    });
 
     const sheetName = workbook.SheetNames[0];
-    console.log("Sheet name:", sheetName);
-    
     const worksheet = workbook.Sheets[sheetName];
 
+    // Get the range to avoid processing empty rows
+    const range = XLSX.utils.decode_range(worksheet['!ref']);
+    console.log(`📊 Sheet range: ${range.s.r} to ${range.e.r} rows`);
+
+    // Convert to JSON with raw values only
     const jsonData = XLSX.utils.sheet_to_json(worksheet, {
       header: 1,
       defval: "",
       blankrows: false,
+      raw: false // Get string values to reduce memory
     });
 
-    console.log("📊 Excel parsed, rows:", jsonData.length);
+    console.log("📊 Parsed rows:", jsonData.length);
 
     if (jsonData.length === 0) {
       return res.status(404).json({
@@ -2021,74 +2006,92 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       });
     }
 
-    // Clean and normalize headers
+    // Clean headers
     const headers = jsonData[0].map(h =>
-      h?.toString().trim().replace(/\u00A0/g, " ")
+      String(h || "").trim().replace(/\u00A0/g, " ")
     );
 
     console.log("Headers:", headers);
 
-    const rows = jsonData.slice(1);
-
+    // Helper function
     const cleanNumber = (val) => {
       if (typeof val === "number") return val;
       if (typeof val === "string") {
-        const cleaned = val.toString().replace(/[^0-9.\-]/g, "");
+        const cleaned = val.replace(/[^0-9.\-]/g, "");
         return cleaned ? parseFloat(cleaned) : 0;
       }
       return 0;
     };
 
-    const parsedData = rows.map((row) => {
-      const obj = {};
-      headers.forEach((header, index) => {
-        obj[header] = row[index] !== undefined ? row[index] : "";
-      });
-      return obj;
-    });
+    // Process rows more efficiently - create objects on the fly
+    const rows = jsonData.slice(1);
+    const parsedData = [];
     
-    console.log("✅ Data parsed, entries:", parsedData.length);
+    // Find column indices once
+    const delayDaysIdx = headers.indexOf("Delay days");
+    const confirmedIdx = headers.indexOf("Confirmed");
+    const supplierIdx = headers.indexOf("Supplier");
+    
+    let totalDelay = 0;
+    let delayedCount = 0;
+    let onTimeCount = 0;
+    let confirmedCount = 0;
+    let maxDelay = 0;
+    const supplierSet = new Set();
 
-    // 5. Calculate Summary Statistics
-    console.log("📊 Calculating summary statistics...");
-    
+    // Single pass through data
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const obj = {};
+      
+      for (let j = 0; j < headers.length; j++) {
+        obj[headers[j]] = row[j] !== undefined ? row[j] : "";
+      }
+      
+      parsedData.push(obj);
+      
+      // Calculate stats in same loop
+      const delayDays = cleanNumber(row[delayDaysIdx]);
+      if (delayDays > 0) {
+        totalDelay += delayDays;
+        delayedCount++;
+        maxDelay = Math.max(maxDelay, delayDays);
+      } else {
+        onTimeCount++;
+      }
+      
+      const confirmed = String(row[confirmedIdx] || "").toLowerCase();
+      if (confirmed === "yes" || confirmed === "y") {
+        confirmedCount++;
+      }
+      
+      const supplier = row[supplierIdx];
+      if (supplier) {
+        supplierSet.add(supplier);
+      }
+    }
+
+    const avgDelay = delayedCount > 0 ? (totalDelay / delayedCount) : 0;
     const totalPos = parsedData.length;
-    
-    const totalDelay = parsedData.reduce(
-      (sum, row) => sum + cleanNumber(row["Delay days"]),
-      0
-    );
-    const delayedPosCount = parsedData.filter(row => cleanNumber(row["Delay days"]) > 0).length;
-    const onTimePosCount = parsedData.filter(row => cleanNumber(row["Delay days"]) === 0).length;
-    
-    const avgDelay = delayedPosCount > 0 ? (totalDelay / delayedPosCount) : 0;
-    
-    const confirmedPosCount = parsedData.filter(row => 
-        row["Confirmed"]?.toString().toLowerCase() === "yes" || 
-        row["Confirmed"]?.toString().toLowerCase() === "y" 
-    ).length;
-    
-    const suppliers = [...new Set(parsedData.map(row => row["Supplier"]))].filter(s => s);
-    
+
     const summary = {
       totalPurchaseOrders: totalPos,
-      totalConfirmedPOs: confirmedPosCount,
-      totalOnTimePOs: onTimePosCount,
-      totalDelayedPOs: delayedPosCount,
-      onTimeRate: totalPos > 0 ? `${((onTimePosCount / totalPos) * 100).toFixed(1)}%` : "N/A",
+      totalConfirmedPOs: confirmedCount,
+      totalOnTimePOs: onTimeCount,
+      totalDelayedPOs: delayedCount,
+      onTimeRate: totalPos > 0 ? `${((onTimeCount / totalPos) * 100).toFixed(1)}%` : "N/A",
       avgDelayDays: avgDelay.toFixed(1),
-      maxDelayDays: parsedData.reduce(
-        (max, row) => Math.max(max, cleanNumber(row["Delay days"])),
-        0
-      ),
-      uniqueSuppliers: suppliers.length,
-      supplierList: suppliers,
+      maxDelayDays: maxDelay,
+      uniqueSuppliers: supplierSet.size,
+      supplierList: Array.from(supplierSet),
     };
 
-    console.log("✅ Summary calculated");
-    console.log("📤 Sending response...");
+    console.log("✅ Processing complete");
 
-    // 6. Send the response
+    // Clear variables to help GC
+    jsonData.length = 0;
+    rows.length = 0;
+
     res.json({
       success: true,
       data: {
@@ -2099,20 +2102,11 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       },
     });
 
-    console.log("✅ Response sent successfully");
+    console.log("✅ Response sent");
 
   } catch (err) {
-    console.error("💥 ERROR occurred:", err.message);
-    console.error("Error name:", err.name);
-    console.error("Error code:", err.code);
-    console.error("Error stack:", err.stack);
+    console.error("💥 ERROR:", err.message);
 
-    if (err.response) {
-      console.error("Error response status:", err.response.status);
-      console.error("Error response data:", JSON.stringify(err.response.data, null, 2));
-    }
-
-    // Check for timeout
     if (err.code === 'ECONNABORTED') {
       return res.status(504).json({
         error: "Request timeout",
