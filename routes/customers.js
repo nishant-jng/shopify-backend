@@ -1161,6 +1161,7 @@ router.get("/customer/:customerId/merchant-performance", async (req, res) => {
       header: 1,
       defval: "",
       blankrows: false,
+      raw: false, // This ensures numbers are read as strings to preserve formatting
     });
 
     if (jsonData.length === 0) {
@@ -1175,20 +1176,13 @@ router.get("/customer/:customerId/merchant-performance", async (req, res) => {
       h?.toString().trim().replace(/\u00A0/g, " ")
     );
 
+    console.log("Headers found:", headers); // Debug log
+
     const rows = jsonData.slice(1);
 
     // Helper to safely parse numbers
     const cleanNumber = (val) => {
-      if (typeof val === "number") return val;
-      if (typeof val === "string") {
-        const cleaned = val.replace(/[^0-9.\-]/g, "");
-        return cleaned ? parseFloat(cleaned) : 0;
-      }
-      return 0;
-    };
-
-    // Helper to safely parse currency values
-    const cleanCurrency = (val) => {
+      if (val === null || val === undefined || val === "") return 0;
       if (typeof val === "number") return val;
       if (typeof val === "string") {
         const cleaned = val.replace(/[^0-9.\-]/g, "");
@@ -1214,19 +1208,54 @@ router.get("/customer/:customerId/merchant-performance", async (req, res) => {
       return res.status(404).json({
         error: "Customer data not found",
         details: `No performance data found for customer email: ${customerEmail}`,
+        availableEmails: parsedData.map(r => r["Email"]).filter(Boolean), // Debug info
       });
     }
 
-    // Return data in original format with only the matched customer's row
+    console.log("Customer data found:", customerData); // Debug log
+
+    // Map to your exact Excel column names
     const summary = {
       totalRows: 1,
-      totalOpenPos: cleanCurrency(customerData["Open Pos"]),
+      
+      // Column C: Volume LY25
+      volumeLY25: cleanNumber(customerData["Volume LY25"]),
+      
+      // Column D: Target FY26
+      targetFY26: cleanNumber(customerData["Target FY26"]),
+      
+      // Column E: YTD FY26
+      ytdActual: cleanNumber(customerData["YTD FY26"]),
+      ytdFY26: cleanNumber(customerData["YTD FY26"]), // Alias for clarity
+      
+      // Column F: Open Pos
+      totalOpenPos: cleanNumber(customerData["Open Pos"]),
+      
+      // Column G: Total orders
       totalOrders: cleanNumber(customerData["Total orders"]),
-      totalOTIF: cleanNumber(customerData["OTIF"]),
+      
+      // Column H: OTIF
+      otifRate: `${cleanNumber(customerData["OTIF"]).toFixed(0)}%`,
+      otifRawAverage: cleanNumber(customerData["OTIF"]),
+      
+      // Column I: Quality Claims LY
       totalQualityClaimsLY: cleanNumber(customerData["Quality Claims LY"]),
+      
+      // Column J: Quality Claims
       totalQualityClaims: cleanNumber(customerData["Quality Claims"]),
+      
+      // Column K: Total SKUs
       totalSKUs: cleanNumber(customerData["Total SKUs"]),
+      
+      // Column L: Converted SKUs
       totalConvertedSKUs: cleanNumber(customerData["Converted SKUs"]),
+      
+      // Column M: Number of Pos
+      numberOfPos: cleanNumber(customerData["Number of Pos"]),
+      
+      // For backward compatibility with your frontend
+      ytdTarget: cleanNumber(customerData["Target FY26"]), // Using Target FY26 as the target
+      lytd: cleanNumber(customerData["Volume LY25"]), // Using Volume LY25 as last year data
     };
 
     res.json({
@@ -1240,6 +1269,7 @@ router.get("/customer/:customerId/merchant-performance", async (req, res) => {
     });
   } catch (err) {
     console.error("Error fetching/parsing Excel file:", err.message);
+    console.error("Full error:", err);
 
     if (err.response?.status === 404) {
       return res.status(404).json({
@@ -1816,7 +1846,7 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
       },
       customerBuyers: allowedBuyers, // Include for debugging/transparency
     });
-  } catch (err) {
+  } catch (err) { 
     console.error("Error fetching/parsing Excel file:", err.message);
     console.error("Full error:", err);
 
