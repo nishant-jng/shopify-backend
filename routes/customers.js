@@ -2006,28 +2006,62 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       });
     }
 
-    // Clean headers
-    const headers = jsonData[0].map(h =>
-      String(h || "").trim().replace(/\u00A0/g, " ")
-    );
+    // Clean headers more thoroughly
+    const headers = jsonData[0].map(h => {
+      let cleaned = String(h || "")
+        .trim()
+        .replace(/\u00A0/g, " ")  // Non-breaking spaces
+        .replace(/\s+/g, " ")      // Multiple spaces to single space
+        .replace(/[\r\n\t]/g, ""); // Remove line breaks and tabs
+      return cleaned;
+    });
 
-    console.log("Headers:", headers);
+    console.log("📋 Cleaned Headers:", headers);
 
     // Define columns to keep
     const columnsToKeep = ["Purchase Order", "Supplier", "EWD", "AWD", "Due Date"];
     
-    // Find indices of required columns
-    const columnIndices = columnsToKeep.map(col => ({
-      name: col,
-      index: headers.indexOf(col)
-    })).filter(col => col.index !== -1); // Only keep columns that exist
+    // Find indices with case-insensitive and flexible matching
+    const columnIndices = columnsToKeep.map(col => {
+      // Try exact match first
+      let index = headers.indexOf(col);
+      
+      // If not found, try case-insensitive match
+      if (index === -1) {
+        index = headers.findIndex(h => 
+          h.toLowerCase() === col.toLowerCase()
+        );
+      }
+      
+      // If still not found, try partial match (in case of extra characters)
+      if (index === -1) {
+        index = headers.findIndex(h => 
+          h.toLowerCase().includes(col.toLowerCase())
+        );
+      }
+      
+      return {
+        name: col,
+        index: index,
+        actualHeader: index !== -1 ? headers[index] : null
+      };
+    }).filter(col => col.index !== -1);
 
-    console.log("Column indices found:", columnIndices);
+    console.log("✅ Column indices found:", columnIndices);
+
+    // Log missing columns for debugging
+    const missingColumns = columnsToKeep.filter(col => 
+      !columnIndices.some(c => c.name === col)
+    );
+    if (missingColumns.length > 0) {
+      console.log("⚠️ Missing columns:", missingColumns);
+      console.log("Available headers:", headers);
+    }
 
     // Also get indices for summary calculations
-    const delayDaysIdx = headers.indexOf("Delay days");
-    const confirmedIdx = headers.indexOf("Confirmed");
-    const supplierIdx = headers.indexOf("Supplier");
+    const delayDaysIdx = headers.findIndex(h => h.toLowerCase().includes("delay"));
+    const confirmedIdx = headers.findIndex(h => h.toLowerCase().includes("confirm"));
+    const supplierIdx = headers.findIndex(h => h.toLowerCase() === "supplier");
 
     // Helper function
     const cleanNumber = (val) => {
