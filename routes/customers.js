@@ -1868,17 +1868,9 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
 
 router.get("/customer/:customerId/recent-pos", async (req, res) => {
   console.log("=== ROUTE HIT ===");
-  console.log("Full URL:", req.originalUrl);
-  console.log("Params:", req.params);
-  console.log("Query:", req.query);
-  console.log("Headers:", req.headers);
-  
   const { customerId } = req.params;
 
-  console.log("Extracted customerId:", customerId);
-
   if (!customerId) {
-    console.log("❌ No customerId provided");
     return res.status(400).json({
       error: "Invalid customerId",
       details: "customerId is required",
@@ -1886,9 +1878,7 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
   }
 
   try {
-    console.log("🔍 Starting metafield fetch for customer:", customerId);
-    
-    // 1. Fetch the metafield containing the Excel file reference/URL
+    // 1. Fetch the metafield
     const query = `
       query getCustomerMetafield($customerId: ID!) {
         customer(id: $customerId) {
@@ -1906,7 +1896,7 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       customerId: `gid://shopify/Customer/${customerId}`,
     };
 
-    console.log("📤 Sending GraphQL query to Shopify:", variables);
+    console.log("📤 Fetching metafield...");
 
     const shopifyResponse = await axios({
       method: "POST",
@@ -1918,8 +1908,7 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       data: { query, variables },
     });
 
-    console.log("📥 Shopify Response Status:", shopifyResponse.status);
-    console.log("📥 Shopify Response Data:", JSON.stringify(shopifyResponse.data, null, 2));
+    console.log("✅ Metafield fetched successfully");
 
     const metafieldData = shopifyResponse.data?.data?.customer?.metafield;
 
@@ -1931,17 +1920,211 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
       });
     }
 
-    console.log("✅ Metafield found:", metafieldData);
+    console.log("✅ Metafield data:", metafieldData);
 
-    // ... rest of your code
+    let fileUrl;
+
+    // 2. Resolve the file URL
+    console.log("📤 Starting file URL resolution...");
+    console.log("Metafield type:", metafieldData.type);
+
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+      console.log("📤 Fetching file URL for fileId:", fileId);
+
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile {
+              url
+            }
+            ... on MediaImage {
+              image {
+                url
+              }
+            }
+          }
+        }
+      `;
+
+      console.log("📤 Sending file query to Shopify...");
+
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+        timeout: 10000, // Add 10 second timeout
+      });
+
+      console.log("📥 File response status:", fileResponse.status);
+      console.log("📥 File response data:", JSON.stringify(fileResponse.data, null, 2));
+
+      fileUrl =
+        fileResponse.data?.data?.node?.url ||
+        fileResponse.data?.data?.node?.image?.url;
+
+      console.log("Resolved fileUrl:", fileUrl);
+
+      if (!fileUrl) {
+        console.log("❌ File URL not found in response");
+        return res.status(404).json({
+          error: "File URL not found",
+          details: "Could not resolve file reference metafield",
+        });
+      }
+    } else {
+      fileUrl = metafieldData.value;
+      console.log("Using direct URL from metafield:", fileUrl);
+    }
+
+    console.log("✅ File URL resolved:", fileUrl);
+
+    // 3. Download the Excel file
+    console.log("📤 Downloading Excel file from:", fileUrl);
+
+    const fileResponse = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "arraybuffer",
+      timeout: 30000, // 30 second timeout for file download
+      maxContentLength: 50 * 1024 * 1024, // 50MB max
+    });
+
+    console.log("📥 File downloaded, size:", fileResponse.data.length, "bytes");
+
+    // 4. Parse the Excel file
+    console.log("📊 Parsing Excel file...");
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+
+    const sheetName = workbook.SheetNames[0];
+    console.log("Sheet name:", sheetName);
     
+    const worksheet = workbook.Sheets[sheetName];
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+    });
+
+    console.log("📊 Excel parsed, rows:", jsonData.length);
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({
+        error: "Empty file",
+        details: "The Excel file contains no data",
+      });
+    }
+
+    // Clean and normalize headers
+    const headers = jsonData[0].map(h =>
+      h?.toString().trim().replace(/\u00A0/g, " ")
+    );
+
+    console.log("Headers:", headers);
+
+    const rows = jsonData.slice(1);
+
+    const cleanNumber = (val) => {
+      if (typeof val === "number") return val;
+      if (typeof val === "string") {
+        const cleaned = val.toString().replace(/[^0-9.\-]/g, "");
+        return cleaned ? parseFloat(cleaned) : 0;
+      }
+      return 0;
+    };
+
+    const parsedData = rows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] !== undefined ? row[index] : "";
+      });
+      return obj;
+    });
+    
+    console.log("✅ Data parsed, entries:", parsedData.length);
+
+    // 5. Calculate Summary Statistics
+    console.log("📊 Calculating summary statistics...");
+    
+    const totalPos = parsedData.length;
+    
+    const totalDelay = parsedData.reduce(
+      (sum, row) => sum + cleanNumber(row["Delay days"]),
+      0
+    );
+    const delayedPosCount = parsedData.filter(row => cleanNumber(row["Delay days"]) > 0).length;
+    const onTimePosCount = parsedData.filter(row => cleanNumber(row["Delay days"]) === 0).length;
+    
+    const avgDelay = delayedPosCount > 0 ? (totalDelay / delayedPosCount) : 0;
+    
+    const confirmedPosCount = parsedData.filter(row => 
+        row["Confirmed"]?.toString().toLowerCase() === "yes" || 
+        row["Confirmed"]?.toString().toLowerCase() === "y" 
+    ).length;
+    
+    const suppliers = [...new Set(parsedData.map(row => row["Supplier"]))].filter(s => s);
+    
+    const summary = {
+      totalPurchaseOrders: totalPos,
+      totalConfirmedPOs: confirmedPosCount,
+      totalOnTimePOs: onTimePosCount,
+      totalDelayedPOs: delayedPosCount,
+      onTimeRate: totalPos > 0 ? `${((onTimePosCount / totalPos) * 100).toFixed(1)}%` : "N/A",
+      avgDelayDays: avgDelay.toFixed(1),
+      maxDelayDays: parsedData.reduce(
+        (max, row) => Math.max(max, cleanNumber(row["Delay days"])),
+        0
+      ),
+      uniqueSuppliers: suppliers.length,
+      supplierList: suppliers,
+    };
+
+    console.log("✅ Summary calculated");
+    console.log("📤 Sending response...");
+
+    // 6. Send the response
+    res.json({
+      success: true,
+      data: {
+        headers,
+        rows: parsedData,
+        summary,
+        rowCount: parsedData.length,
+      },
+    });
+
+    console.log("✅ Response sent successfully");
+
   } catch (err) {
     console.error("💥 ERROR occurred:", err.message);
+    console.error("Error name:", err.name);
+    console.error("Error code:", err.code);
     console.error("Error stack:", err.stack);
-    
+
     if (err.response) {
       console.error("Error response status:", err.response.status);
       console.error("Error response data:", JSON.stringify(err.response.data, null, 2));
+    }
+
+    // Check for timeout
+    if (err.code === 'ECONNABORTED') {
+      return res.status(504).json({
+        error: "Request timeout",
+        details: "The file download or processing took too long",
+      });
+    }
+
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: "File not found",
+        details: "The Excel file URL is not accessible",
+      });
     }
 
     return res.status(500).json({
