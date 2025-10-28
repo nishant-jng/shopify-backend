@@ -1865,6 +1865,287 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
   }
 });
 
+router.get("/customer/:customerId/buyer-volume-shipped", async (req, res) => {
+  try {
+    const { customerId } = req.params;
+
+    if (!customerId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        details: "Customer ID is required"
+      });
+    }
+
+    // Fetch customer's buyer name from metafield
+    const customerQuery = `
+      query getCustomerBuyer($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          metafield(namespace: "custom", key: "buyer_name") {
+            value
+          }
+        }
+      }
+    `;
+
+    const customerResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { 
+        query: customerQuery, 
+        variables: { customerId: `gid://shopify/Customer/${customerId}` }
+      },
+    });
+
+    const buyerName = customerResponse.data?.data?.customer?.metafield?.value;
+    
+    if (!buyerName) {
+      return res.status(404).json({
+        error: "Buyer name not found",
+        details: "Customer does not have a buyer_name metafield assigned"
+      });
+    }
+
+    const normalizedBuyerName = buyerName.trim().toUpperCase();
+    console.log("Customer ID:", customerId);
+    console.log("Customer buyer name:", normalizedBuyerName);
+
+    // Fetch shop metafield for Excel file
+    const query = `
+      query getShopMetafield {
+        shop {
+          metafield(namespace: "custom", key: "volumeshippedytd") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query },
+    });
+
+    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Excel file not found",
+        details: "No volumeshippedytd metafield found"
+      });
+    }
+
+    let fileUrl;
+
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile {
+              url
+            }
+            ... on MediaImage {
+              image {
+                url
+              }
+            }
+          }
+        }
+      `;
+
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+      });
+
+      fileUrl = fileResponse.data?.data?.node?.url || fileResponse.data?.data?.node?.image?.url;
+
+      if (!fileUrl) {
+        return res.status(404).json({
+          error: "File URL not found",
+          details: "Could not resolve file reference metafield",
+        });
+      }
+    } else {
+      fileUrl = metafieldData.value;
+    }
+
+    // Download and parse Excel file
+    const fileResponse = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "arraybuffer",
+    });
+
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: false,
+    });
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({
+        error: "Empty file",
+        details: "The Excel file contains no data",
+      });
+    }
+
+    // Find header row
+    let headerRowIndex = 0;
+    for (let i = 0; i < jsonData.length; i++) {
+      if (jsonData[i] && jsonData[i].length > 0 && jsonData[i][0]) {
+        headerRowIndex = i;
+        break;
+      }
+    }
+
+    const headers = jsonData[headerRowIndex].map((h) =>
+      h?.toString().trim().replace(/\u00A0/g, " ").replace(/\s+/g, " ")
+    );
+
+    const rows = jsonData.slice(headerRowIndex + 1).filter(row => 
+      row && row.length > 0 && (row[0] || row[1])
+    );
+
+    const cleanNumber = (val) => {
+      if (val === null || val === undefined || val === "") return 0;
+      if (typeof val === "number") return val;
+      if (typeof val === "string") {
+        const cleaned = val.replace(/[^0-9.\-]/g, "");
+        return cleaned ? parseFloat(cleaned) : 0;
+      }
+      return 0;
+    };
+
+    // Parse all data rows
+    const parsedData = rows.map((row) => {
+      const obj = {
+        buyer: row[0]?.toString().trim().toUpperCase() || "",
+        vendor: row[1]?.toString().trim() || "",
+      };
+
+      headers.slice(2).forEach((month, index) => {
+        obj[month] = cleanNumber(row[index + 2]);
+      });
+
+      return obj;
+    });
+
+    // Filter by customer's buyer name
+    const customerData = parsedData.filter(row => row.buyer === normalizedBuyerName);
+
+    console.log("Total rows in file:", parsedData.length);
+    console.log("Rows for this buyer:", customerData.length);
+
+    if (customerData.length === 0) {
+      return res.json({
+        success: true,
+        data: {
+          buyerName: normalizedBuyerName,
+          suppliers: [],
+          volumeBySupplier: {},
+          volumeByMonth: {},
+          grandTotal: 0
+        },
+        message: "No volume data found for this buyer"
+      });
+    }
+
+    // Get unique suppliers for this buyer
+    const suppliers = [...new Set(customerData.map(row => row.vendor))].filter(v => v);
+
+    // Calculate volume by supplier (aggregated across all months)
+    const volumeBySupplier = {};
+    const monthColumns = headers.slice(2);
+
+    customerData.forEach((row) => {
+      if (row.vendor) {
+        if (!volumeBySupplier[row.vendor]) {
+          volumeBySupplier[row.vendor] = {
+            totalVolume: 0,
+            byMonth: {}
+          };
+        }
+        
+        monthColumns.forEach((month) => {
+          const value = row[month] || 0;
+          volumeBySupplier[row.vendor].totalVolume += value;
+          
+          if (!volumeBySupplier[row.vendor].byMonth[month]) {
+            volumeBySupplier[row.vendor].byMonth[month] = 0;
+          }
+          volumeBySupplier[row.vendor].byMonth[month] += value;
+        });
+      }
+    });
+
+    // Calculate total volume by month (across all suppliers)
+    const volumeByMonth = {};
+    monthColumns.forEach((month) => {
+      volumeByMonth[month] = customerData.reduce(
+        (sum, row) => sum + (row[month] || 0),
+        0
+      );
+    });
+
+    // Calculate grand total
+    const grandTotal = Object.values(volumeByMonth).reduce((sum, val) => sum + val, 0);
+
+    res.json({
+      success: true,
+      data: {
+        buyerName: normalizedBuyerName,
+        suppliers: suppliers.sort(),
+        volumeBySupplier,
+        volumeByMonth,
+        monthColumns,
+        grandTotal,
+        rowCount: customerData.length
+      }
+    });
+
+  } catch (err) { 
+    console.error("Error fetching/parsing Excel file:", err.message);
+    console.error("Full error:", err);
+
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: "File not found",
+        details: "The Excel file URL is not accessible",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message || "An unexpected error occurred",
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+    });
+  }
+});
+
 
 router.get("/customer/:customerId/recent-pos", async (req, res) => {
   const { customerId } = req.params;
