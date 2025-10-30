@@ -3149,43 +3149,12 @@ router.get("/customer/:customerId/supplier-info", async (req, res) => {
   }
 
   try {
-    // First, get the customer's email
-    const customerQuery = `
-      query getCustomer($customerId: ID!) {
+    // Fetch customer metafield for the supplier info Excel file
+    const customerMetafieldQuery = `
+      query getCustomerMetafield($customerId: ID!) {
         customer(id: $customerId) {
           id
           email
-        }
-      }
-    `;
-
-    const customerVariables = {
-      customerId: `gid://shopify/Customer/${customerId}`,
-    };
-
-    const customerResponse = await axios({
-      method: "POST",
-      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
-      },
-      data: { query: customerQuery, variables: customerVariables },
-    });
-
-    const customerEmail = customerResponse.data?.data?.customer?.email;
-
-    if (!customerEmail) {
-      return res.status(404).json({
-        error: "Customer not found",
-        details: `No customer found with ID ${customerId}`,
-      });
-    }
-
-    // Fetch shop metafield for the supplier info Excel file
-    const shopMetafieldQuery = `
-      query getShopMetafield {
-        shop {
           metafield(namespace: "custom", key: "supplier_info") {
             id
             value
@@ -3195,6 +3164,10 @@ router.get("/customer/:customerId/supplier-info", async (req, res) => {
       }
     `;
 
+    const customerVariables = {
+      customerId: `gid://shopify/Customer/${customerId}`,
+    };
+
     const shopifyResponse = await axios({
       method: "POST",
       url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
@@ -3202,15 +3175,25 @@ router.get("/customer/:customerId/supplier-info", async (req, res) => {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
       },
-      data: { query: shopMetafieldQuery },
+      data: { query: customerMetafieldQuery, variables: customerVariables },
     });
 
-    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+    const customerData = shopifyResponse.data?.data?.customer;
+    const customerEmail = customerData?.email;
+
+    if (!customerEmail) {
+      return res.status(404).json({
+        error: "Customer not found",
+        details: `No customer found with ID ${customerId}`,
+      });
+    }
+
+    const metafieldData = customerData?.metafield;
 
     if (!metafieldData) {
       return res.status(404).json({
         error: "Excel file not found",
-        details: "No shop metafield found for supplier information",
+        details: "No customer metafield found for supplier information",
       });
     }
 
@@ -3304,27 +3287,25 @@ router.get("/customer/:customerId/supplier-info", async (req, res) => {
       return obj;
     });
 
-    // Filter suppliers related to this customer (assuming there's an Email or Buyer column)
-    // Adjust the column name based on your Excel structure
-    const customerSuppliers = parsedData.filter(
-      (row) => row["Buyer Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim()
-    );
+    // Transform all rows to supplier format
+    // If you want to filter by customer, uncomment the filter logic
+    const suppliers = parsedData
+      // .filter(row => row["Buyer Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim())
+      .map((row, index) => ({
+        id: index + 1,
+        company: row["Supplier Name"] || row["Company"] || row["Supplier"] || "",
+        contactPerson: row["Contact Person"] || row["Contact"] || "",
+        email: row["Email"] || row["Supplier Email"] || "",
+        phone: row["Phone"] || row["Contact Number"] || row["Phone Number"] || "",
+      }))
+      .filter(s => s.company); // Filter out empty entries
 
-    if (customerSuppliers.length === 0) {
+    if (suppliers.length === 0) {
       return res.status(404).json({
         error: "No suppliers found",
-        details: `No supplier data found for customer email: ${customerEmail}`,
+        details: `No supplier data found in the Excel file`,
       });
     }
-
-    // Transform data to match frontend structure
-    const suppliers = customerSuppliers.map((row, index) => ({
-      id: index + 1,
-      company: row["Supplier Name"] || row["Company"] || "",
-      contactPerson: row["Contact Person"] || row["Contact"] || "",
-      email: row["Email"] || row["Supplier Email"] || "",
-      phone: row["Phone"] || row["Contact Number"] || "",
-    }));
 
     res.json({
       success: true,
