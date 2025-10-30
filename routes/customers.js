@@ -3137,5 +3137,218 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
     });
   }
 });
+
+router.get("/customer/:customerId/supplier-info", async (req, res) => {
+  const { customerId } = req.params;
+
+  if (!customerId) {
+    return res.status(400).json({
+      error: "Invalid customerId",
+      details: "customerId is required",
+    });
+  }
+
+  try {
+    // First, get the customer's email
+    const customerQuery = `
+      query getCustomer($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          email
+        }
+      }
+    `;
+
+    const customerVariables = {
+      customerId: `gid://shopify/Customer/${customerId}`,
+    };
+
+    const customerResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: customerQuery, variables: customerVariables },
+    });
+
+    const customerEmail = customerResponse.data?.data?.customer?.email;
+
+    if (!customerEmail) {
+      return res.status(404).json({
+        error: "Customer not found",
+        details: `No customer found with ID ${customerId}`,
+      });
+    }
+
+    // Fetch shop metafield for the supplier info Excel file
+    const shopMetafieldQuery = `
+      query getShopMetafield {
+        shop {
+          metafield(namespace: "custom", key: "supplierinfo") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: shopMetafieldQuery },
+    });
+
+    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Excel file not found",
+        details: "No shop metafield found for supplier information",
+      });
+    }
+
+    let fileUrl;
+
+    // Case 1: metafield type is file_reference
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile {
+              url
+            }
+            ... on MediaImage {
+              image {
+                url
+              }
+            }
+          }
+        }
+      `;
+
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+      });
+
+      fileUrl =
+        fileResponse.data?.data?.node?.url ||
+        fileResponse.data?.data?.node?.image?.url;
+
+      if (!fileUrl) {
+        return res.status(404).json({
+          error: "File URL not found",
+          details: "Could not resolve file reference metafield",
+        });
+      }
+    } else {
+      // Case 2: direct URL stored as value
+      fileUrl = metafieldData.value;
+    }
+
+    // Download the file
+    const fileResponse = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "arraybuffer",
+    });
+
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: false,
+    });
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({
+        error: "Empty file",
+        details: "The Excel file contains no data",
+      });
+    }
+
+    // Clean and normalize headers
+    const headers = jsonData[0].map(h =>
+      h?.toString().trim().replace(/\u00A0/g, " ")
+    );
+
+    console.log("Supplier Info Headers found:", headers);
+
+    const rows = jsonData.slice(1);
+
+    const parsedData = rows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] !== undefined ? row[index] : "";
+      });
+      return obj;
+    });
+
+    // Filter suppliers related to this customer (assuming there's an Email or Buyer column)
+    // Adjust the column name based on your Excel structure
+    const customerSuppliers = parsedData.filter(
+      (row) => row["Buyer Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim()
+    );
+
+    if (customerSuppliers.length === 0) {
+      return res.status(404).json({
+        error: "No suppliers found",
+        details: `No supplier data found for customer email: ${customerEmail}`,
+      });
+    }
+
+    // Transform data to match frontend structure
+    const suppliers = customerSuppliers.map((row, index) => ({
+      id: index + 1,
+      company: row["Supplier Name"] || row["Company"] || "",
+      contactPerson: row["Contact Person"] || row["Contact"] || "",
+      email: row["Email"] || row["Supplier Email"] || "",
+      phone: row["Phone"] || row["Contact Number"] || "",
+    }));
+
+    res.json({
+      success: true,
+      data: {
+        suppliers,
+        totalSuppliers: suppliers.length,
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching/parsing supplier info:", err.message);
+    console.error("Full error:", err);
+
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: "File not found",
+        details: "The Excel file URL is not accessible",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message || "An unexpected error occurred",
+    });
+  }
+});
 // Export the router to be used in server.js
 module.exports = router;
