@@ -3186,7 +3186,7 @@ router.get("/customer/:customerId/supplier-info", async (req, res) => {
     const shopMetafieldQuery = `
       query getShopMetafield {
         shop {
-          metafield(namespace: "custom", key: "supplierinfo") {
+          metafield(namespace: "custom", key: "supplier_info") {
             id
             value
             type
