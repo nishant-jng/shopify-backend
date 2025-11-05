@@ -113,7 +113,7 @@ const countryToPhoneCode = {
   'Other': 'US' // Default to US format for 'Other'
 };
 
-app.post("/register-firebase", async (req, res) => {
+router.post("/register-firebase", async (req, res) => {
   try {
     const { firstName, lastName, email, password } = req.body;
 
