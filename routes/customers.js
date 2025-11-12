@@ -14,7 +14,7 @@ const { EMAIL_PASS, EMAIL_USER,SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN} = process.env
 
 
 const transporter = nodemailer.createTransport({
-  service: process.env.EMAIL_SERVICE || 'gmail',
+  service: process.env.EMAIL_SERVICE || 'gmail', 
   auth: {
     user: EMAIL_USER,
     pass: EMAIL_PASS
@@ -1047,6 +1047,337 @@ router.delete("/customer/:customerId",authenticate, async (req, res) => {
 //   }
 // });
 
+
+router.get("/customer/:customerId/merchants-performance", async (req, res) => {
+  const { customerId } = req.params;
+  const { buyer } = req.query; // Optional buyer filter
+
+  if (!customerId) {
+    return res.status(400).json({
+      error: "Invalid customerId",
+      details: "customerId is required",
+    });
+  }
+
+  try {
+    // First, get the customer's email and buyers metafield
+    const customerQuery = `
+      query getCustomer($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          email
+          metafield(namespace: "custom", key: "buyers") {
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const customerVariables = {
+      customerId: `gid://shopify/Customer/${customerId}`,
+    };
+
+    const customerResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: customerQuery, variables: customerVariables },
+    });
+
+    const customerData = customerResponse.data?.data?.customer;
+    const customerEmail = customerData?.email;
+
+    if (!customerEmail) {
+      return res.status(404).json({
+        error: "Customer not found",
+        details: `No customer found with ID ${customerId}`,
+      });
+    }
+
+    // Parse buyers metafield (list.single_line_text_field)
+    let availableBuyers = [];
+    if (customerData?.metafield?.value) {
+      try {
+        availableBuyers = JSON.parse(customerData.metafield.value);
+      } catch (e) {
+        console.warn("Failed to parse buyers metafield:", e);
+      }
+    }
+
+    // Fetch shop metafield for the performance Excel file
+    const shopMetafieldQuery = `
+      query getShopMetafield {
+        shop {
+          metafield(namespace: "custom", key: "merchantperformance") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: shopMetafieldQuery },
+    });
+
+    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Excel file not found",
+        details: "No shop metafield found for merchant performance",
+      });
+    }
+
+    let fileUrl;
+
+    // Case 1: metafield type is file_reference
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile {
+              url
+            }
+            ... on MediaImage {
+              image {
+                url
+              }
+            }
+          }
+        }
+      `;
+
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+      });
+
+      fileUrl =
+        fileResponse.data?.data?.node?.url ||
+        fileResponse.data?.data?.node?.image?.url;
+
+      if (!fileUrl) {
+        return res.status(404).json({
+          error: "File URL not found",
+          details: "Could not resolve file reference metafield",
+        });
+      }
+    } else {
+      fileUrl = metafieldData.value;
+    }
+
+    // Download the file
+    const fileResponse = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "arraybuffer",
+    });
+
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: false,
+    });
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({
+        error: "Empty file",
+        details: "The Excel file contains no data",
+      });
+    }
+
+    // Clean and normalize headers
+    const headers = jsonData[0].map(h =>
+      h?.toString().trim().replace(/\u00A0/g, " ")
+    );
+
+    const rows = jsonData.slice(1);
+
+    // Helper to safely parse numbers
+    const cleanNumber = (val) => {
+      if (val === null || val === undefined || val === "") return 0;
+      if (typeof val === "number") return val;
+      if (typeof val === "string") {
+        const cleaned = val.replace(/[^0-9.\-]/g, "");
+        return cleaned ? parseFloat(cleaned) : 0;
+      }
+      return 0;
+    };
+
+    const parsedData = rows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] !== undefined ? row[index] : "";
+      });
+      return obj;
+    });
+
+    // Find all rows matching customer email
+    const customerRows = parsedData.filter(
+      (row) => row["Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim()
+    );
+
+    if (customerRows.length === 0) {
+      return res.status(404).json({
+        error: "Customer data not found",
+        details: `No performance data found for customer email: ${customerEmail}`,
+      });
+    }
+
+    // Check if merchant handles multiple buyers
+    const buyerColumn = customerRows.map(row => row["Buyer"]).filter(Boolean);
+    const isMultiBuyer = buyerColumn.length > 1;
+    const hasCollective = customerRows.some(row => 
+      row["Buyer"]?.toString().toLowerCase().includes("collective")
+    );
+
+    // Filter by buyer if specified
+    let filteredRows = customerRows;
+    if (buyer && buyer !== "All") {
+      filteredRows = customerRows.filter(row => 
+        row["Buyer"]?.toString().trim() === buyer
+      );
+      
+      if (filteredRows.length === 0) {
+        return res.status(404).json({
+          error: "Buyer data not found",
+          details: `No performance data found for buyer: ${buyer}`,
+        });
+      }
+    }
+
+    // Aggregate data for the selected buyer(s)
+    const aggregateSummary = (rows) => {
+      const totals = {
+        volumeLY25: 0,
+        targetFY26: 0,
+        ytdFY26: 0,
+        totalOpenPos: 0,
+        totalOrders: 0,
+        otifValues: [],
+        otifLYValues: [],
+        totalQualityClaimsLY: 0,
+        totalQualityClaims: 0,
+        totalSKUs: 0,
+        totalConvertedSKUs: 0,
+        numberOfPos: 0,
+      };
+
+      rows.forEach(row => {
+        totals.volumeLY25 += cleanNumber(row["Volume LY25"]);
+        totals.targetFY26 += cleanNumber(row["Target FY26"]);
+        totals.ytdFY26 += cleanNumber(row["YTD FY26"]);
+        totals.totalOpenPos += cleanNumber(row["Open Pos"]);
+        totals.totalOrders += cleanNumber(row["Total orders"]);
+        
+        const otif = cleanNumber(row["OTIF"]);
+        if (otif > 0) totals.otifValues.push(otif);
+        
+        const otifLY = cleanNumber(row["OTIF LY"]);
+        if (otifLY > 0) totals.otifLYValues.push(otifLY);
+        
+        totals.totalQualityClaimsLY += cleanNumber(row["Quality Claims LY"]);
+        totals.totalQualityClaims += cleanNumber(row["Quality Claims"]);
+        totals.totalSKUs += cleanNumber(row["Total SKUs"]);
+        totals.totalConvertedSKUs += cleanNumber(row["Converted SKUs"]);
+        totals.numberOfPos += cleanNumber(row["Number of Pos"]);
+      });
+
+      // Calculate average OTIF
+      const avgOtif = totals.otifValues.length > 0
+        ? totals.otifValues.reduce((a, b) => a + b, 0) / totals.otifValues.length
+        : 0;
+
+      const avgOtifLY = totals.otifLYValues.length > 0
+        ? totals.otifLYValues.reduce((a, b) => a + b, 0) / totals.otifLYValues.length
+        : 0;
+
+      return {
+        totalRows: rows.length,
+        volumeLY25: totals.volumeLY25,
+        targetFY26: totals.targetFY26,
+        ytdActual: totals.ytdFY26,
+        ytdFY26: totals.ytdFY26,
+        totalOpenPos: totals.totalOpenPos,
+        totalOrders: totals.totalOrders,
+        otifRate: `${avgOtif.toFixed(0)}%`,
+        otifRawAverage: avgOtif,
+        otifLY: avgOtifLY,
+        totalQualityClaimsLY: totals.totalQualityClaimsLY,
+        totalQualityClaims: totals.totalQualityClaims,
+        totalSKUs: totals.totalSKUs,
+        totalConvertedSKUs: totals.totalConvertedSKUs,
+        numberOfPos: totals.numberOfPos,
+        ytdTarget: totals.targetFY26,
+        lytd: totals.volumeLY25,
+      };
+    };
+
+    const summary = aggregateSummary(filteredRows);
+
+    // Get list of buyers for this merchant
+    const buyersList = Array.from(new Set(
+      customerRows.map(row => row["Buyer"]).filter(Boolean)
+    )).sort();
+
+    res.json({
+      success: true,
+      data: {
+        headers,
+        rows: filteredRows,
+        summary,
+        rowCount: filteredRows.length,
+        isMultiBuyer,
+        hasCollective,
+        availableBuyers: buyersList,
+        currentBuyer: buyer || "All",
+        metafieldBuyers: availableBuyers, // From customer metafield
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching/parsing Excel file:", err.message);
+    console.error("Full error:", err);
+
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: "File not found",
+        details: "The Excel file URL is not accessible",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message || "An unexpected error occurred",
+    });
+  }
+});
+
 router.get("/customer/:customerId/merchant-performance", async (req, res) => {
   const { customerId } = req.params;
 
@@ -1311,232 +1642,7 @@ router.get("/customer/:customerId/merchant-performance", async (req, res) => {
     });
   }
 });
-router.get("/customer/:customerId/buyer-performance", async (req, res) => {
- const { customerId } = req.params;
-
- if (!customerId) {
- return res.status(400).json({
- error: "Invalid customerId",
- details: "customerId is required",
- });
- }
-
- try {
- // First, get the customer's email
- const customerQuery = `
- query getCustomer($customerId: ID!) {
- customer(id: $customerId) {
- id
- email
- }
- }
- `;
-
- const customerVariables = {
- customerId: `gid://shopify/Customer/${customerId}`,
- };
-
- const customerResponse = await axios({
- method: "POST",
- url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
- headers: {
- "Content-Type": "application/json",
- "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
- },
- data: { query: customerQuery, variables: customerVariables },
- });
-
- const customerEmail = customerResponse.data?.data?.customer?.email;
-
- if (!customerEmail) {
- return res.status(404).json({
- error: "Customer not found",
- details: `No customer found with ID ${customerId}`,
- });
- }
-
- // Fetch shop metafield for the buyer's performance Excel file
- const shopMetafieldQuery = `
- query getShopMetafield {
- shop {
- metafield(namespace: "custom", key: "buyers_performance") {
- id
- value
- type
- }
- }
- }
- `;
-
- const shopifyResponse = await axios({
- method: "POST",
- url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
- headers: {
- "Content-Type": "application/json",
- "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
- },
- data: { query: shopMetafieldQuery },
- });
-
- const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
-
- if (!metafieldData) {
- return res.status(404).json({
- error: "Excel file not found",
- details: "No shop metafield found for buyer performance",
- });
- }
-
- let fileUrl;
-
- // Case 1: metafield type is file_reference
- if (metafieldData.type === "file_reference") {
- const fileId = metafieldData.value;
-
- const fileQuery = `
- query getFileUrl($fileId: ID!) {
- node(id: $fileId) {
- ... on GenericFile {
- url
- }
- ... on MediaImage {
- image {
- url
- }
- }
- }
- }
- `;
-
- const fileApiResponse = await axios({
- method: "POST",
- url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
- headers: {
- "Content-Type": "application/json",
- "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
- },
- data: { query: fileQuery, variables: { fileId } },
- });
-
- fileUrl =
- fileApiResponse.data?.data?.node?.url ||
- fileApiResponse.data?.data?.node?.image?.url;
-
- if (!fileUrl) {
- return res.status(404).json({
- error: "File URL not found",
- details: "Could not resolve file reference metafield",
- });
- }
- } else {
- // Case 2: direct URL stored as value
- fileUrl = metafieldData.value;
- }
-
- // Download the file
- const fileResponse = await axios({
- method: "GET",
- url: fileUrl,
- responseType: "arraybuffer",
- });
-
- const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
- const sheetName = workbook.SheetNames[0];
- const worksheet = workbook.Sheets[sheetName];
- const jsonData = XLSX.utils.sheet_to_json(worksheet, {
- header: 1,
- defval: "",
- blankrows: false,
- raw: false,
- });
-
- if (jsonData.length === 0) {
- return res.status(404).json({
- error: "Empty file",
- details: "The Excel file contains no data",
- });
- }
-
- // Clean and normalize headers
- const headers = jsonData[0].map(h =>
- h?.toString().trim().replace(/\u00A0/g, " ")
- );
- const rows = jsonData.slice(1);
-
- // Helper to safely parse numbers and currency
- const cleanNumber = (val) => {
- if (val === null || val === undefined || val === "") return 0;
- if (typeof val === "number") return val;
- if (typeof val === "string") {
- const cleaned = val.replace(/[^0-9.\-]/g, "");
- return cleaned ? parseFloat(cleaned) : 0;
- }
- return 0;
- };
-
- const parsedData = rows.map((row) => {
- const obj = {};
- headers.forEach((header, index) => {
- obj[header] = row[index] !== undefined ? row[index] : "";
- });
- return obj;
- });
-
- // Find customer's data by matching email
- const customerData = parsedData.find(
- (row) => row["Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim()
- );
-
- if (!customerData) {
- return res.status(404).json({
- error: "Customer data not found",
- details: `No performance data found for customer email: ${customerEmail}`,
- availableEmails: parsedData.map(r => r["Email"]).filter(Boolean),
- });
- }
-
- // Map data from the new Excel columns
- const summary = {
- totalRows: 1,
- businessName: customerData["Business Name"],
- shippedPosCurrent: cleanNumber(customerData["Shipped Pos current"]),
- shippedPosLast: cleanNumber(customerData["Shipped Pos last"]),
- ytdFY26: cleanNumber(customerData["YTD FY26"]),
- openPosCurrent: cleanNumber(customerData["Open Pos current"]),
- openPosNext: cleanNumber(customerData["Open Pos next"]),
- totalOrders: cleanNumber(customerData["Total orders"]),
- otifRate: `${cleanNumber(customerData["OTIF"]).toFixed(0)}%`,
- otifRaw: cleanNumber(customerData["OTIF"]),
- openPosYTD: cleanNumber(customerData["Open Pos YTD"]),
- shippedPosYTD: cleanNumber(customerData["Shipped Pos YTD"]),
- };
-
- res.json({
- success: true,
- data: {
- headers,
- rows: [customerData],
- summary,
- rowCount: 1,
- },
- });
- } catch (err) {
- console.error("Error fetching/parsing Excel file:", err.message);
- console.error("Full error:", err);
-
- if (err.response?.status === 404) {
- return res.status(404).json({
- error: "File not found",
- details: "The Excel file URL is not accessible",
- });
- }
-
- return res.status(500).json({
- error: "Failed to fetch or parse Excel file",
- details: err.message || "An unexpected error occurred",
- });
- }
-});
+   
 
 router.get("/customer/:customerId/performance", async (req, res) => {
   const { customerId } = req.params;
