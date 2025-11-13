@@ -3529,7 +3529,7 @@ router.get("/customer/:customerId/buyer-recent-pos", async (req, res) => {
       query getCustomerBusinessName($customerId: ID!) {
         customer(id: $customerId) {
           id
-          metafield(namespace: "custom", key: "businessname") {
+          metafield(namespace: "custom", key: "business_name") {
             value
           }
         }
