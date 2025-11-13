@@ -3511,6 +3511,326 @@ router.get("/customer/:customerId/recent-pos", async (req, res) => {
     });
   }
 });
+router.get("/customer/:customerId/buyer-recent-pos", async (req, res) => {
+  const { customerId } = req.params;
+
+  if (!customerId) {
+    return res.status(400).json({
+      error: "Invalid customerId",
+      details: "customerId is required",
+    });
+  }
+
+  try {
+    console.log("📤 Fetching customer business name for:", customerId);
+
+    // 1. Fetch the customer's business name metafield
+    const customerQuery = `
+      query getCustomerBusinessName($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          metafield(namespace: "custom", key: "businessname") {
+            value
+          }
+        }
+      }
+    `;
+
+    const customerVariables = {
+      customerId: `gid://shopify/Customer/${customerId}`,
+    };
+
+    const customerResponse = await axios({
+      method: "POST",
+      url: `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: customerQuery, variables: customerVariables },
+    });
+
+    const businessName = customerResponse.data?.data?.customer?.metafield?.value;
+
+    if (!businessName) {
+      return res.status(404).json({
+        error: "Business name not found",
+        details: `No 'businessname' metafield found for customer ${customerId}`,
+      });
+    }
+
+    console.log("✅ Business name found:", businessName);
+
+    // 2. Fetch the shop metafield containing the Excel file
+    console.log("📤 Fetching shop metafield for recent POs...");
+
+    const shopQuery = `
+      query getShopMetafield {
+        shop {
+          metafield(namespace: "custom", key: "buyerrecentpo") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: shopQuery },
+    });
+
+    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Recent POs Excel file not found",
+        details: "No 'recentpo' metafield found in shop metafields",
+      });
+    }
+
+    console.log("✅ Shop metafield found, type:", metafieldData.type);
+
+    let fileUrl;
+
+    // 3. Resolve file URL
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+      console.log("📤 Resolving file URL...");
+
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile {
+              url
+            }
+          }
+        }
+      `;
+
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${process.env.SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+        timeout: 10000,
+      });
+
+      fileUrl = fileResponse.data?.data?.node?.url;
+
+      if (!fileUrl) {
+        return res.status(404).json({
+          error: "File URL not found",
+          details: "Could not resolve file reference metafield",
+        });
+      }
+    } else {
+      fileUrl = metafieldData.value;
+    }
+
+    console.log("✅ File URL resolved, downloading...");
+
+    // 4. Download Excel file with size limit
+    const fileResponse = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "arraybuffer",
+      timeout: 30000,
+      maxContentLength: 10 * 1024 * 1024, // Limit to 10MB
+    });
+
+    console.log("📥 File downloaded:", fileResponse.data.length, "bytes");
+
+    // 5. Parse Excel efficiently
+    const XLSX = require("xlsx");
+    
+    const workbook = XLSX.read(fileResponse.data, { 
+      type: "buffer",
+      cellDates: true,
+      cellNF: false,
+      cellHTML: false
+    });
+
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const range = XLSX.utils.decode_range(worksheet['!ref']);
+    console.log(`📊 Sheet range: ${range.s.r} to ${range.e.r} rows`);
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: false
+    });
+
+    console.log("📊 Parsed rows:", jsonData.length);
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({
+        error: "Empty file",
+        details: "The Excel file contains no data",
+      });
+    }
+
+    // Clean headers
+    const headers = jsonData[0].map(h => {
+      let cleaned = String(h || "")
+        .trim()
+        .replace(/\u00A0/g, " ")
+        .replace(/\s+/g, " ")
+        .replace(/[\r\n\t]/g, "");
+      return cleaned;
+    });
+
+    console.log("📋 Cleaned Headers:", headers);
+
+    // Define columns to keep (updated based on new Excel structure)
+    const columnsToKeep = ["Buyer", "Supplier", "PO No.", "Po Signed Date", "Ex factory Date"];
+    
+    // Find indices with flexible matching
+    const columnIndices = columnsToKeep.map(col => {
+      let index = headers.indexOf(col);
+      
+      if (index === -1) {
+        index = headers.findIndex(h => 
+          h.toLowerCase() === col.toLowerCase()
+        );
+      }
+      
+      if (index === -1) {
+        index = headers.findIndex(h => 
+          h.toLowerCase().includes(col.toLowerCase())
+        );
+      }
+      
+      return {
+        name: col,
+        index: index,
+        actualHeader: index !== -1 ? headers[index] : null
+      };
+    }).filter(col => col.index !== -1);
+
+    console.log("✅ Column indices found:", columnIndices);
+
+    // Find Buyer column index for filtering
+    const buyerIdx = headers.findIndex(h => 
+      h.toLowerCase() === "buyer" || h.toLowerCase().includes("buyer")
+    );
+
+    if (buyerIdx === -1) {
+      return res.status(500).json({
+        error: "Invalid Excel structure",
+        details: "Buyer column not found in Excel file",
+      });
+    }
+
+    // Log missing columns for debugging
+    const missingColumns = columnsToKeep.filter(col => 
+      !columnIndices.some(c => c.name === col)
+    );
+    if (missingColumns.length > 0) {
+      console.log("⚠️ Missing columns:", missingColumns);
+      console.log("Available headers:", headers);
+    }
+
+    // Process rows and filter by business name
+    const rows = jsonData.slice(1);
+    const parsedData = [];
+    
+    let totalPos = 0;
+    const supplierSet = new Set();
+
+    // Single pass through data - filter and create objects
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const buyerValue = String(row[buyerIdx] || "").trim();
+      
+      // Only include rows where Buyer matches the customer's business name
+      if (buyerValue.toLowerCase() === businessName.toLowerCase()) {
+        const obj = {};
+        
+        // Only create object with required columns
+        for (let col of columnIndices) {
+          obj[col.name] = row[col.index] !== undefined ? row[col.index] : "";
+        }
+        
+        parsedData.push(obj);
+        totalPos++;
+        
+        // Track unique suppliers
+        const supplierIdx = columnIndices.find(c => c.name === "Supplier")?.index;
+        if (supplierIdx !== undefined) {
+          const supplier = row[supplierIdx];
+          if (supplier) {
+            supplierSet.add(supplier);
+          }
+        }
+      }
+    }
+
+    console.log(`✅ Filtered ${totalPos} POs for business: ${businessName}`);
+
+    const summary = {
+      businessName: businessName,
+      totalPurchaseOrders: totalPos,
+      uniqueSuppliers: supplierSet.size,
+      supplierList: Array.from(supplierSet),
+    };
+
+    console.log("✅ Processing complete");
+
+    // Clear variables to help GC
+    jsonData.length = 0;
+    rows.length = 0;
+
+    // Return only the column names that were found
+    const returnedHeaders = columnIndices.map(col => col.name);
+
+    res.json({
+      success: true,
+      data: {
+        headers: returnedHeaders,
+        rows: parsedData,
+        summary,
+        rowCount: parsedData.length,
+      },
+    });
+
+    console.log("✅ Response sent");
+
+  } catch (err) {
+    console.error("💥 ERROR:", err.message);
+
+    if (err.code === 'ECONNABORTED') {
+      return res.status(504).json({
+        error: "Request timeout",
+        details: "The file download or processing took too long",
+      });
+    }
+
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: "File not found",
+        details: "The Excel file URL is not accessible",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message || "An unexpected error occurred",
+    });
+  }
+});
 
 router.get("/customer/:customerId/supplier-info", async (req, res) => {
   const { customerId } = req.params;
