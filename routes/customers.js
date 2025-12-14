@@ -1084,7 +1084,10 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         "Content-Type": "application/json",
         "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
       },
-      data: { query: customerQuery, variables: customerVariables },
+      data: {
+        query: customerQuery,
+        variables: customerVariables
+      },
     });
 
     const customerData = customerResponse.data?.data?.customer;
@@ -1144,7 +1147,6 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
     // Case 1: metafield type is file_reference
     if (metafieldData.type === "file_reference") {
       const fileId = metafieldData.value;
-
       const fileQuery = `
         query getFileUrl($fileId: ID!) {
           node(id: $fileId) {
@@ -1167,12 +1169,13 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
           "Content-Type": "application/json",
           "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
         },
-        data: { query: fileQuery, variables: { fileId } },
+        data: {
+          query: fileQuery,
+          variables: { fileId }
+        },
       });
 
-      fileUrl =
-        fileResponse.data?.data?.node?.url ||
-        fileResponse.data?.data?.node?.image?.url;
+      fileUrl = fileResponse.data?.data?.node?.url || fileResponse.data?.data?.node?.image?.url;
 
       if (!fileUrl) {
         return res.status(404).json({
@@ -1193,10 +1196,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 
     const XLSX = require("xlsx");
     const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
-
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-
     const jsonData = XLSX.utils.sheet_to_json(worksheet, {
       header: 1,
       defval: "",
@@ -1215,7 +1216,6 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
     const headers = jsonData[0].map(h =>
       h?.toString().trim().replace(/\u00A0/g, " ")
     );
-
     const rows = jsonData.slice(1);
 
     // Helper to safely parse numbers
@@ -1252,17 +1252,17 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
     // Check if merchant handles multiple buyers
     const buyerColumn = customerRows.map(row => row["Buyer"]).filter(Boolean);
     const isMultiBuyer = buyerColumn.length > 1;
-    const hasCollective = customerRows.some(row => 
-      row["Buyer"]?.toString().toLowerCase().includes("collective")
+    const hasTotal = customerRows.some(row =>
+      row["Buyer"]?.toString().toLowerCase().includes("total")
     );
 
     // Filter by buyer if specified
     let filteredRows = customerRows;
     if (buyer && buyer !== "All") {
-      filteredRows = customerRows.filter(row => 
+      filteredRows = customerRows.filter(row =>
         row["Buyer"]?.toString().trim() === buyer
       );
-      
+
       if (filteredRows.length === 0) {
         return res.status(404).json({
           error: "Buyer data not found",
@@ -1271,8 +1271,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
       }
     }
 
-    // Check if Collective is selected
-    const isCollectiveSelected = buyer && buyer.toLowerCase().includes('collective');
+    // Check if Total is selected
+    const isTotalSelected = buyer && buyer.toLowerCase().includes('total');
 
     // Aggregate data function
     const aggregateSummary = (rows) => {
@@ -1289,9 +1289,9 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         totalSKUs: 0,
         totalConvertedSKUs: 0,
         numberOfPos: 0,
-        latePos:0,
-        onTimePos:0,
-        };
+        latePos: 0,
+        onTimePos: 0,
+      };
 
       rows.forEach(row => {
         totals.volumeLY25 += cleanNumber(row["Volume LY25"]);
@@ -1299,13 +1299,13 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         totals.ytdFY26 += cleanNumber(row["YTD FY26"]);
         totals.totalOpenPos += cleanNumber(row["Open Pos"]);
         totals.totalOrders += cleanNumber(row["Total orders"]);
-        
+
         const otif = cleanNumber(row["OTIF"]);
         if (otif > 0) totals.otifValues.push(otif);
-        
+
         const otifLY = cleanNumber(row["OTIF LY"]);
         if (otifLY > 0) totals.otifLYValues.push(otifLY);
-        
+
         totals.totalQualityClaimsLY += cleanNumber(row["Quality Claims LY"]);
         totals.totalQualityClaims += cleanNumber(row["Quality Claims"]);
         totals.totalSKUs += cleanNumber(row["Total SKUs"]);
@@ -1349,33 +1349,32 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 
     let summary;
 
-    // Special handling for Collective buyer - use row data directly without aggregation
-    if (isCollectiveSelected && filteredRows.length > 0) {
-      const collectiveRow = filteredRows[0];
-      
+    // Special handling for Total buyer - use row data directly without aggregation
+    if (isTotalSelected && filteredRows.length > 0) {
+      const totalRow = filteredRows[0];
       summary = {
         totalRows: 1,
-        volumeLY25: cleanNumber(collectiveRow["Volume LY25"]),
-        targetFY26: cleanNumber(collectiveRow["Target FY26"]),
-        ytdActual: cleanNumber(collectiveRow["YTD FY26"]),
-        ytdFY26: cleanNumber(collectiveRow["YTD FY26"]),
-        totalOpenPos: cleanNumber(collectiveRow["Open Pos"]),
-        totalOrders: cleanNumber(collectiveRow["Total orders"]),
-        otifRate: `${cleanNumber(collectiveRow["OTIF"]).toFixed(0)}%`,
-        otifRawAverage: cleanNumber(collectiveRow["OTIF"]),
-        otifLY: cleanNumber(collectiveRow["OTIF LY"]),
-        totalQualityClaimsLY: cleanNumber(collectiveRow["Quality Claims LY"]),
-        totalQualityClaims: cleanNumber(collectiveRow["Quality Claims"]),
-        totalSKUs: cleanNumber(collectiveRow["Total SKUs"]),
-        totalConvertedSKUs: cleanNumber(collectiveRow["Converted SKUs"]),
-        numberOfPos: cleanNumber(collectiveRow["Number of Pos"]),
-        ytdTarget: cleanNumber(collectiveRow["Target FY26"]),
-        lytd: cleanNumber(collectiveRow["Volume LY25"]),
-        latePos: cleanNumber(collectiveRow["Late Pos"]),
-        onTimePos: cleanNumber(collectiveRow["Ontime Pos"]),
+        volumeLY25: cleanNumber(totalRow["Volume LY25"]),
+        targetFY26: cleanNumber(totalRow["Target FY26"]),
+        ytdActual: cleanNumber(totalRow["YTD FY26"]),
+        ytdFY26: cleanNumber(totalRow["YTD FY26"]),
+        totalOpenPos: cleanNumber(totalRow["Open Pos"]),
+        totalOrders: cleanNumber(totalRow["Total orders"]),
+        otifRate: `${cleanNumber(totalRow["OTIF"]).toFixed(0)}%`,
+        otifRawAverage: cleanNumber(totalRow["OTIF"]),
+        otifLY: cleanNumber(totalRow["OTIF LY"]),
+        totalQualityClaimsLY: cleanNumber(totalRow["Quality Claims LY"]),
+        totalQualityClaims: cleanNumber(totalRow["Quality Claims"]),
+        totalSKUs: cleanNumber(totalRow["Total SKUs"]),
+        totalConvertedSKUs: cleanNumber(totalRow["Converted SKUs"]),
+        numberOfPos: cleanNumber(totalRow["Number of Pos"]),
+        ytdTarget: cleanNumber(totalRow["Target FY26"]),
+        lytd: cleanNumber(totalRow["Volume LY25"]),
+        latePos: cleanNumber(totalRow["Late Pos"]),
+        onTimePos: cleanNumber(totalRow["Ontime Pos"]),
       };
     } else {
-      // Use aggregation for non-Collective buyers
+      // Use aggregation for non-Total buyers
       summary = aggregateSummary(filteredRows);
     }
 
@@ -1391,53 +1390,51 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
       determinedCurrentBuyer = buyer;
     } else {
       // No buyer selected - pick a default
-      // PREFER non-Collective buyers for initial load
-      const nonCollectiveBuyers = buyersList.filter(b => 
-        !b.toLowerCase().includes('collective')
+      // PREFER Total buyer for initial load if available
+      const totalBuyer = buyersList.find(b =>
+        b.toLowerCase().includes('total')
       );
       
-      if (nonCollectiveBuyers.length > 0) {
-        // Use first non-collective buyer
-        determinedCurrentBuyer = nonCollectiveBuyers[0];
-      } else if (hasCollective) {
-        // Only use collective if no other buyers exist
-        determinedCurrentBuyer = buyersList.find(b => 
-          b.toLowerCase().includes('collective')
-        );
+      if (totalBuyer) {
+        // Use Total buyer first
+        determinedCurrentBuyer = totalBuyer;
       } else {
-        // Fallback
-        determinedCurrentBuyer = buyersList[0] || "Unknown";
+        // Otherwise use first non-Total buyer
+        const nonTotalBuyers = buyersList.filter(b =>
+          !b.toLowerCase().includes('total')
+        );
+        determinedCurrentBuyer = nonTotalBuyers[0] || buyersList[0] || "Unknown";
       }
-      
-      // Re-filter and re-calculate summary for the determined buyer
+
+      // Re-filter and re-calculate summary for the determined buyer if no buyer was specified
       if (!buyer) {
-        filteredRows = customerRows.filter(row => 
+        filteredRows = customerRows.filter(row =>
           row["Buyer"]?.toString().trim() === determinedCurrentBuyer
         );
-        
+
         // Recalculate summary for the determined buyer
-        if (determinedCurrentBuyer.toLowerCase().includes('collective')) {
-          const collectiveRow = filteredRows[0];
+        if (determinedCurrentBuyer.toLowerCase().includes('total')) {
+          const totalRow = filteredRows[0];
           summary = {
             totalRows: 1,
-            volumeLY25: cleanNumber(collectiveRow["Volume LY25"]),
-            targetFY26: cleanNumber(collectiveRow["Target FY26"]),
-            ytdActual: cleanNumber(collectiveRow["YTD FY26"]),
-            ytdFY26: cleanNumber(collectiveRow["YTD FY26"]),
-            totalOpenPos: cleanNumber(collectiveRow["Open Pos"]),
-            totalOrders: cleanNumber(collectiveRow["Total orders"]),
-            otifRate: `${cleanNumber(collectiveRow["OTIF"]).toFixed(0)}%`,
-            otifRawAverage: cleanNumber(collectiveRow["OTIF"]),
-            otifLY: cleanNumber(collectiveRow["OTIF LY"]),
-            totalQualityClaimsLY: cleanNumber(collectiveRow["Quality Claims LY"]),
-            totalQualityClaims: cleanNumber(collectiveRow["Quality Claims"]),
-            totalSKUs: cleanNumber(collectiveRow["Total SKUs"]),
-            totalConvertedSKUs: cleanNumber(collectiveRow["Converted SKUs"]),
-            numberOfPos: cleanNumber(collectiveRow["Number of Pos"]),
-            ytdTarget: cleanNumber(collectiveRow["Target FY26"]),
-            lytd: cleanNumber(collectiveRow["Volume LY25"]),
-            latePos: cleanNumber(collectiveRow["Late Pos"]),
-            onTimePos: cleanNumber(collectiveRow["Ontime Pos"]),
+            volumeLY25: cleanNumber(totalRow["Volume LY25"]),
+            targetFY26: cleanNumber(totalRow["Target FY26"]),
+            ytdActual: cleanNumber(totalRow["YTD FY26"]),
+            ytdFY26: cleanNumber(totalRow["YTD FY26"]),
+            totalOpenPos: cleanNumber(totalRow["Open Pos"]),
+            totalOrders: cleanNumber(totalRow["Total orders"]),
+            otifRate: `${cleanNumber(totalRow["OTIF"]).toFixed(0)}%`,
+            otifRawAverage: cleanNumber(totalRow["OTIF"]),
+            otifLY: cleanNumber(totalRow["OTIF LY"]),
+            totalQualityClaimsLY: cleanNumber(totalRow["Quality Claims LY"]),
+            totalQualityClaims: cleanNumber(totalRow["Quality Claims"]),
+            totalSKUs: cleanNumber(totalRow["Total SKUs"]),
+            totalConvertedSKUs: cleanNumber(totalRow["Converted SKUs"]),
+            numberOfPos: cleanNumber(totalRow["Number of Pos"]),
+            ytdTarget: cleanNumber(totalRow["Target FY26"]),
+            lytd: cleanNumber(totalRow["Volume LY25"]),
+            latePos: cleanNumber(totalRow["Late Pos"]),
+            onTimePos: cleanNumber(totalRow["Ontime Pos"]),
           };
         } else {
           summary = aggregateSummary(filteredRows);
@@ -1453,12 +1450,13 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         summary,
         rowCount: filteredRows.length,
         isMultiBuyer,
-        hasCollective,
+        hasTotal,
         availableBuyers: buyersList,
         currentBuyer: determinedCurrentBuyer,
         metafieldBuyers: availableBuyers,
       },
     });
+
   } catch (err) {
     console.error("Error fetching/parsing Excel file:", err.message);
     console.error("Full error:", err);
@@ -1476,7 +1474,6 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
     });
   }
 });
-
 
 // router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 //   const { customerId } = req.params;
@@ -1702,7 +1699,10 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 //       }
 //     }
 
-//     // Aggregate data for the selected buyer(s)
+//     // Check if Collective is selected
+//     const isCollectiveSelected = buyer && buyer.toLowerCase().includes('collective');
+
+//     // Aggregate data function
 //     const aggregateSummary = (rows) => {
 //       const totals = {
 //         volumeLY25: 0,
@@ -1717,7 +1717,9 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 //         totalSKUs: 0,
 //         totalConvertedSKUs: 0,
 //         numberOfPos: 0,
-//       };
+//         latePos:0,
+//         onTimePos:0,
+//         };
 
 //       rows.forEach(row => {
 //         totals.volumeLY25 += cleanNumber(row["Volume LY25"]);
@@ -1737,6 +1739,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 //         totals.totalSKUs += cleanNumber(row["Total SKUs"]);
 //         totals.totalConvertedSKUs += cleanNumber(row["Converted SKUs"]);
 //         totals.numberOfPos += cleanNumber(row["Number of Pos"]);
+//         totals.latePos += cleanNumber(row["Late Pos"]);
+//         totals.onTimePos += cleanNumber(row["Ontime Pos"]);
 //       });
 
 //       // Calculate average OTIF
@@ -1766,45 +1770,123 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 //         numberOfPos: totals.numberOfPos,
 //         ytdTarget: totals.targetFY26,
 //         lytd: totals.volumeLY25,
+//         latePos: totals.latePos,
+//         onTimePos: totals.onTimePos,
 //       };
 //     };
 
-//     const summary = aggregateSummary(filteredRows);
+//     let summary;
+
+//     // Special handling for Collective buyer - use row data directly without aggregation
+//     if (isCollectiveSelected && filteredRows.length > 0) {
+//       const collectiveRow = filteredRows[0];
+      
+//       summary = {
+//         totalRows: 1,
+//         volumeLY25: cleanNumber(collectiveRow["Volume LY25"]),
+//         targetFY26: cleanNumber(collectiveRow["Target FY26"]),
+//         ytdActual: cleanNumber(collectiveRow["YTD FY26"]),
+//         ytdFY26: cleanNumber(collectiveRow["YTD FY26"]),
+//         totalOpenPos: cleanNumber(collectiveRow["Open Pos"]),
+//         totalOrders: cleanNumber(collectiveRow["Total orders"]),
+//         otifRate: `${cleanNumber(collectiveRow["OTIF"]).toFixed(0)}%`,
+//         otifRawAverage: cleanNumber(collectiveRow["OTIF"]),
+//         otifLY: cleanNumber(collectiveRow["OTIF LY"]),
+//         totalQualityClaimsLY: cleanNumber(collectiveRow["Quality Claims LY"]),
+//         totalQualityClaims: cleanNumber(collectiveRow["Quality Claims"]),
+//         totalSKUs: cleanNumber(collectiveRow["Total SKUs"]),
+//         totalConvertedSKUs: cleanNumber(collectiveRow["Converted SKUs"]),
+//         numberOfPos: cleanNumber(collectiveRow["Number of Pos"]),
+//         ytdTarget: cleanNumber(collectiveRow["Target FY26"]),
+//         lytd: cleanNumber(collectiveRow["Volume LY25"]),
+//         latePos: cleanNumber(collectiveRow["Late Pos"]),
+//         onTimePos: cleanNumber(collectiveRow["Ontime Pos"]),
+//       };
+//     } else {
+//       // Use aggregation for non-Collective buyers
+//       summary = aggregateSummary(filteredRows);
+//     }
 
 //     // Get list of buyers for this merchant
 //     const buyersList = Array.from(new Set(
 //       customerRows.map(row => row["Buyer"]).filter(Boolean)
 //     )).sort();
 
+//     // Determine the current buyer to display
 //     let determinedCurrentBuyer;
 //     if (buyer && buyer !== "All") {
 //       // User explicitly selected a buyer
 //       determinedCurrentBuyer = buyer;
 //     } else {
 //       // No buyer selected - pick a default
-//       if (hasCollective) {
-//         // If collective exists, use it
-//         determinedCurrentBuyer = buyersList.find(b => b.toLowerCase().includes('collective')) || buyersList[0];
+//       // PREFER non-Collective buyers for initial load
+//       const nonCollectiveBuyers = buyersList.filter(b => 
+//         !b.toLowerCase().includes('collective')
+//       );
+      
+//       if (nonCollectiveBuyers.length > 0) {
+//         // Use first non-collective buyer
+//         determinedCurrentBuyer = nonCollectiveBuyers[0];
+//       } else if (hasCollective) {
+//         // Only use collective if no other buyers exist
+//         determinedCurrentBuyer = buyersList.find(b => 
+//           b.toLowerCase().includes('collective')
+//         );
 //       } else {
-//         // No collective - just use first buyer
+//         // Fallback
 //         determinedCurrentBuyer = buyersList[0] || "Unknown";
+//       }
+      
+//       // Re-filter and re-calculate summary for the determined buyer
+//       if (!buyer) {
+//         filteredRows = customerRows.filter(row => 
+//           row["Buyer"]?.toString().trim() === determinedCurrentBuyer
+//         );
+        
+//         // Recalculate summary for the determined buyer
+//         if (determinedCurrentBuyer.toLowerCase().includes('collective')) {
+//           const collectiveRow = filteredRows[0];
+//           summary = {
+//             totalRows: 1,
+//             volumeLY25: cleanNumber(collectiveRow["Volume LY25"]),
+//             targetFY26: cleanNumber(collectiveRow["Target FY26"]),
+//             ytdActual: cleanNumber(collectiveRow["YTD FY26"]),
+//             ytdFY26: cleanNumber(collectiveRow["YTD FY26"]),
+//             totalOpenPos: cleanNumber(collectiveRow["Open Pos"]),
+//             totalOrders: cleanNumber(collectiveRow["Total orders"]),
+//             otifRate: `${cleanNumber(collectiveRow["OTIF"]).toFixed(0)}%`,
+//             otifRawAverage: cleanNumber(collectiveRow["OTIF"]),
+//             otifLY: cleanNumber(collectiveRow["OTIF LY"]),
+//             totalQualityClaimsLY: cleanNumber(collectiveRow["Quality Claims LY"]),
+//             totalQualityClaims: cleanNumber(collectiveRow["Quality Claims"]),
+//             totalSKUs: cleanNumber(collectiveRow["Total SKUs"]),
+//             totalConvertedSKUs: cleanNumber(collectiveRow["Converted SKUs"]),
+//             numberOfPos: cleanNumber(collectiveRow["Number of Pos"]),
+//             ytdTarget: cleanNumber(collectiveRow["Target FY26"]),
+//             lytd: cleanNumber(collectiveRow["Volume LY25"]),
+//             latePos: cleanNumber(collectiveRow["Late Pos"]),
+//             onTimePos: cleanNumber(collectiveRow["Ontime Pos"]),
+//           };
+//         } else {
+//           summary = aggregateSummary(filteredRows);
+//         }
 //       }
 //     }
 
 //     res.json({
-//   success: true,
-//   data: {
-//     headers,
-//     rows: filteredRows,
-//     summary,
-//     rowCount: filteredRows.length,
-//     isMultiBuyer,
-//     hasCollective,
-//     availableBuyers: buyersList,
-//     currentBuyer: determinedCurrentBuyer,  // Use the determined buyer
-//     metafieldBuyers: availableBuyers,
-//   },
-// });
+//       success: true,
+//       data: {
+//         headers,
+//         rows: filteredRows,
+//         summary,
+//         rowCount: filteredRows.length,
+//         isMultiBuyer,
+//         hasCollective,
+//         availableBuyers: buyersList,
+//         currentBuyer: determinedCurrentBuyer,
+//         metafieldBuyers: availableBuyers,
+//       },
+//     });
 //   } catch (err) {
 //     console.error("Error fetching/parsing Excel file:", err.message);
 //     console.error("Full error:", err);
@@ -1822,6 +1904,7 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 //     });
 //   }
 // });
+
 
 router.get("/customer/:customerId/merchant-performance", async (req, res) => {
   const { customerId } = req.params;
