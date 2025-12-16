@@ -160,6 +160,7 @@ Output must be strictly valid JSON only. No explanations.
 Output JSON format: { "matches": ["Product Title 1","Product Title 2"] }
 `;
 
+  //changes are made based on model update
   const resp = await axios.post(
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
     {
