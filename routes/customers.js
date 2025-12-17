@@ -113,6 +113,267 @@ const countryToPhoneCode = {
   'Other': 'US' // Default to US format for 'Other'
 };
 
+
+// ✅ ADD THIS NEW ENDPOINT TO YOUR EXISTING customers.js ROUTER
+
+/**
+ * POST /api/customers/sync-from-mobile
+ * Creates/updates a Shopify customer from mobile app sign-up
+ * Uses the SAME customerId from Firebase for consistency
+ */
+
+
+router.post("/sync-from-mobile", async (req, res) => {
+  const {
+    customerId,
+    customer_name,
+    business_name,
+    email,
+    customer_role,
+    customer_phone,
+    country = 'India',
+    domain_name,
+    number_of_employees = '1-10',
+  } = req.body;
+
+  // Input validation
+  if (!customerId || !customer_name || !email) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing required fields',
+      details: 'customerId, customer_name, and email are required'
+    });
+  }
+
+  console.log(`🔄 Mobile sync request for customer: ${customerId}`);
+  console.log(`   Email: ${email}`);
+  console.log(`   Role: ${customer_role}`);
+
+  try {
+    // ✅ STEP 1: Check if customer already exists in Shopify
+    let shopifyCustomerId;
+    let shopifyCustomerExists = false;
+
+    try {
+      console.log('🔍 Searching for existing Shopify customer...');
+
+      // Search by the customerId stored in metafields
+      const searchQuery = `
+        query {
+          customers(first: 1, query: "email:${email}") {
+            edges {
+              node {
+                id
+                email
+                metafield(namespace: "custom", key: "customer_id") {
+                  value
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      const searchResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN
+        },
+        data: { query: searchQuery }
+      });
+
+      const customers = searchResponse.data?.data?.customers?.edges || [];
+
+      if (customers.length > 0) {
+        const existingCustomer = customers[0].node;
+        shopifyCustomerId = existingCustomer.id.split('/').pop();
+        shopifyCustomerExists = true;
+        console.log(`✅ Found existing Shopify customer: ${shopifyCustomerId}`);
+      }
+    } catch (searchError) {
+      console.log('⚠️ Search failed, will create new customer:', searchError.message);
+    }
+
+    // ✅ STEP 2: Create or update Shopify customer
+    if (!shopifyCustomerExists) {
+      console.log('🔄 Creating new Shopify customer...');
+
+      const nameParts = customer_name.trim().split(' ');
+      const firstName = nameParts[0];
+      const lastName = nameParts.slice(1).join(' ') || firstName;
+
+      // Create customer using REST API
+      const createPayload = {
+        customer: {
+          first_name: firstName,
+          last_name: lastName,
+          email: email,
+          phone: customer_phone || null,
+          tags: 'mobile-app-synced',
+          note: `Synced from mobile app. Firebase customerId: ${customerId}`,
+          email_marketing_consent: {
+            state: 'not_subscribed',
+            opt_in_level: 'single_opt_in'
+          }
+        }
+      };
+
+      try {
+        const createResponse = await shopifyApi.post('/customers.json', createPayload);
+        shopifyCustomerId = createResponse.data.customer.id;
+        console.log(`✅ Created Shopify customer: ${shopifyCustomerId}`);
+      } catch (createError) {
+        if (createError.response?.status === 422) {
+          // Customer exists, search again
+          console.log('Customer exists, searching...');
+          const encodedEmail = encodeURIComponent(email);
+          const existingCust = await shopifyApi.get(`/customers/search.json?query=email:${encodedEmail}`);
+
+          if (existingCust.data.customers?.length > 0) {
+            shopifyCustomerId = existingCust.data.customers[0].id;
+            console.log(`✅ Found existing customer: ${shopifyCustomerId}`);
+          } else {
+            throw new Error('Customer exists but could not be found');
+          }
+        } else {
+          throw createError;
+        }
+      }
+    }
+
+    // ✅ STEP 3: Update Shopify metafields with all customer data
+    console.log('🔄 Updating Shopify metafields...');
+
+    const metafieldsPayload = [
+      {
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "customer_id",
+        type: "single_line_text_field",
+        value: customerId // ✅ Store Firebase customerId
+      },
+      {
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "name",
+        type: "single_line_text_field",
+        value: customer_name
+      },
+      {
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "business_name",
+        type: "single_line_text_field",
+        value: business_name || customer_name
+      },
+      {
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "role",
+        type: "single_line_text_field",
+        value: customer_role || 'Buyer'
+      },
+      {
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "contact",
+        type: "single_line_text_field",
+        value: customer_phone || ""
+      },
+      {
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "country",
+        type: "single_line_text_field",
+        value: country
+      },
+      {
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "number_of_employees",
+        type: "single_line_text_field",
+        value: number_of_employees
+      }
+    ];
+
+    if (domain_name) {
+      metafieldsPayload.push({
+        ownerId: `gid://shopify/Customer/${shopifyCustomerId}`,
+        namespace: "custom",
+        key: "domain",
+        type: "single_line_text_field",
+        value: domain_name
+      });
+    }
+
+    const metafieldsQuery = `
+      mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+        metafieldsSet(metafields: $metafields) {
+          metafields { id key value }
+          userErrors { field message }
+        }
+      }
+    `;
+
+    const metafieldsResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN
+      },
+      data: {
+        query: metafieldsQuery,
+        variables: { metafields: metafieldsPayload }
+      }
+    });
+
+    const metafieldsResult = metafieldsResponse.data;
+
+    if (metafieldsResult.data?.metafieldsSet?.userErrors?.length > 0) {
+      console.warn('⚠️ Metafields update had errors:', metafieldsResult.data.metafieldsSet.userErrors);
+    } else {
+      console.log('✅ All metafields updated successfully');
+    }
+
+    // ✅ STEP 4: Return success response
+    res.json({
+      success: true,
+      message: 'Customer synced to Shopify successfully',
+      data: {
+        firebaseCustomerId: customerId,
+        shopifyCustomerId: shopifyCustomerId,
+        email: email,
+        name: customer_name,
+        role: customer_role,
+        synced: true
+      }
+    });
+
+    console.log(`✅ Mobile sync completed for customer ${customerId}`);
+
+  } catch (error) {
+    console.error('❌ Mobile sync error:', error.message);
+
+    // Return detailed error for debugging
+    res.status(500).json({
+      success: false,
+      error: 'Failed to sync customer to Shopify',
+      details: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error',
+      shopifyError: error.response?.data
+    });
+  }
+});
+
+
+
+
+
+
+
+
 router.post("/register-firebase", async (req, res) => {
   try {
     const { firstName, lastName, email, password } = req.body;
@@ -424,6 +685,8 @@ router.post("/", authenticateManualHmac,async (req, res) => {
     });
   }
 });
+
+
 
 // GET /customer/:customerId - Retrieve specific customer data
 router.get("/customer/:customerId",async (req, res) => {
