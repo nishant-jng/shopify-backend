@@ -1552,6 +1552,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         totalSKUs: 0,
         totalConvertedSKUs: 0,
         numberOfPos: 0,
+        openPosCount:0,
+        growth:0,
         latePos: 0,
         onTimePos: 0,
       };
@@ -1569,11 +1571,15 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         const otifLY = cleanNumber(row["OTIF LY"]);
         if (otifLY > 0) totals.otifLYValues.push(otifLY);
 
+        const growth = cleanNumber(row["Growth"]);
+        if (growth) totals.growth += growth;
+
         totals.totalQualityClaimsLY += cleanNumber(row["Quality Claims LY"]);
         totals.totalQualityClaims += cleanNumber(row["Quality Claims"]);
         totals.totalSKUs += cleanNumber(row["Total SKUs"]);
         totals.totalConvertedSKUs += cleanNumber(row["Converted SKUs"]);
         totals.numberOfPos += cleanNumber(row["Number of Pos"]);
+        totals.openPosCount += cleanNumber(row["Open Pos count"])
         totals.latePos += cleanNumber(row["Late Pos"]);
         totals.onTimePos += cleanNumber(row["Ontime Pos"]);
       });
@@ -1603,6 +1609,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         totalSKUs: totals.totalSKUs,
         totalConvertedSKUs: totals.totalConvertedSKUs,
         numberOfPos: totals.numberOfPos,
+        openPosCount: totals.openPosCount,
+        growth: totals.growth,
         ytdTarget: totals.targetFY26,
         lytd: totals.volumeLY25,
         latePos: totals.latePos,
@@ -1631,6 +1639,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         totalSKUs: cleanNumber(totalRow["Total SKUs"]),
         totalConvertedSKUs: cleanNumber(totalRow["Converted SKUs"]),
         numberOfPos: cleanNumber(totalRow["Number of Pos"]),
+        openPosCount: cleanNumber(totalRow["Open Pos count"]),
+        growth: cleanNumber(totalRow["Growth"]),
         ytdTarget: cleanNumber(totalRow["Target FY26"]),
         lytd: cleanNumber(totalRow["Volume LY25"]),
         latePos: cleanNumber(totalRow["Late Pos"]),
@@ -1694,6 +1704,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
             totalSKUs: cleanNumber(totalRow["Total SKUs"]),
             totalConvertedSKUs: cleanNumber(totalRow["Converted SKUs"]),
             numberOfPos: cleanNumber(totalRow["Number of Pos"]),
+            openPosCount: cleanNumber(totalRow["Open Pos count"]),
+            growth: cleanNumber(totalRow["Growth"]),
             ytdTarget: cleanNumber(totalRow["Target FY26"]),
             lytd: cleanNumber(totalRow["Volume LY25"]),
             latePos: cleanNumber(totalRow["Late Pos"]),
