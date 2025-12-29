@@ -22,6 +22,7 @@
     "express-rate-limit": "^8.0.1",
     "firebase-admin": "^13.5.0",
     "google-libphonenumber": "^3.2.43",
+    "multer": "^2.0.2",
     "nodemailer": "^7.0.6",
     "puppeteer": "^24.22.0",
     "xlsx": "^0.18.5"

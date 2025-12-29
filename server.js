@@ -86,6 +86,7 @@ const getCustomerWishListRoutes = require('./routes/getCustomerWishlist');
 const customerListsRoutes = require('./routes/customerLists');
 const shareListRoutes = require('./routes/shareList'); 
 const customers = require('./routes/customers');
+const visualSearchRoutes = require('./routes/visualSearch');
 
  
 // --- Environment Variable Validation ---
@@ -142,6 +143,7 @@ app.use("/wishlist", updateCustomerWishlistRoutes);
 app.use("/customer-wishlist", getCustomerWishListRoutes);
 app.use('/customer-lists', customerListsRoutes); 
 app.use("/share-list", shareListRoutes);
+app.use("/visual-search", visualSearchRoutes);
 
 // --- Core Routes ---
 app.get("/health", (req, res) => {
