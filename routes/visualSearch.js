@@ -22,10 +22,22 @@ const upload = multer({
   }
 });
 
+// --- Product Cache ---
+let productCache = null;
+let cacheTime = null;
+const CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
+
 // --- Helper Functions ---
 
-// Fetches product data from Shopify (same as text search)
+// Fetches product data from Shopify with caching
 async function fetchProductsForVisualSearch() {
+  // Return cached products if still valid
+  if (productCache && cacheTime && (Date.now() - cacheTime < CACHE_DURATION)) {
+    console.log('Using cached products:', productCache.length);
+    return productCache;
+  }
+
+  console.log('Fetching fresh products from Shopify...');
   let allProducts = [];
   let hasNextPage = true;
   let cursor = null;
@@ -144,29 +156,35 @@ async function fetchProductsForVisualSearch() {
     cursor = data.products.pageInfo.endCursor;
   }
 
+  // Cache the results
+  productCache = allProducts;
+  cacheTime = Date.now();
+  console.log(`Cached ${allProducts.length} products`);
+  
   return allProducts;
 }
 
-// Enhanced Gemini visual search with image understanding
+// Enhanced Gemini visual search with image understanding (optimized)
 async function geminiVisualSearch(imageBase64, mimeType, products) {
+  // Only send first 300 products to Gemini for faster processing
+  const limitedProducts = products.slice(0, 300);
+  
   const prompt = `
 You are an intelligent visual search assistant for an e-commerce store.
 Analyze the uploaded image and find similar or matching products from the catalog.
 
-Available products (${products.length} items):
-${products.map(
-  p => `- ${p.title} | Type: ${p.productType || 'N/A'} | Vendor: ${p.vendor} | Tags: ${p.tags.join(", ")} | ${p.summary} | Stock: ${p.availableForSale ? 'Available' : 'Unavailable'}`
+Available products (${limitedProducts.length} items):
+${limitedProducts.map(
+  p => `- ${p.title} | Type: ${p.productType || 'N/A'} | Tags: ${p.tags.slice(0, 3).join(", ")}`
 ).join("\n")}
 
 Instructions:
 1. Analyze the visual content of the uploaded image
-2. Identify: colors, style, category, pattern, material, aesthetic
-3. Match these visual attributes to products in the catalog
-4. Consider product type, tags, and descriptions
-5. Prioritize visually similar items
-6. Return ONLY titles of best matching products
-7. Prioritize available products
-8. Maximum 8 best matches
+2. Identify: colors, style, category, pattern, material
+3. Match these attributes to products in the catalog
+4. Return ONLY titles of best matching products
+5. Prioritize available products
+6. Maximum 8 best matches
 
 Output must be strictly valid JSON only. No explanations.
 Output JSON format: { "matches": ["Product Title 1","Product Title 2"], "detected": "brief description of what you see in the image" }
@@ -192,7 +210,8 @@ Output JSON format: { "matches": ["Product Title 1","Product Title 2"], "detecte
       headers: { 
         "Content-Type": "application/json", 
         "x-goog-api-key": GEMINI_API_KEY 
-      } 
+      },
+      timeout: 30000 // 30 second timeout
     }
   );
 
@@ -222,6 +241,9 @@ const visualSearchLimiter = rateLimit({
 
 // --- Visual Search API Route ---
 router.post("/", visualSearchLimiter, upload.single('image'), async (req, res) => {
+  // Set timeout to 90 seconds
+  req.setTimeout(90000);
+  
   try {
     // Check if image was uploaded
     if (!req.file) {
@@ -236,20 +258,36 @@ router.post("/", visualSearchLimiter, upload.single('image'), async (req, res) =
     const mimeType = req.file.mimetype;
 
     console.log(`Visual search initiated - Image size: ${req.file.size} bytes, Type: ${mimeType}`);
+    const startTime = Date.now();
 
-    // Fetch products and perform visual search
+    // Fetch products (cached if available)
     const products = await fetchProductsForVisualSearch();
+    const fetchTime = Date.now() - startTime;
+    console.log(`Products fetched in ${fetchTime}ms (${products.length} total)`);
+
+    // Perform visual search with Gemini
+    const geminiStart = Date.now();
     const result = await geminiVisualSearch(imageBase64, mimeType, products);
+    const geminiTime = Date.now() - geminiStart;
+    console.log(`Gemini analysis completed in ${geminiTime}ms, found ${result.matches?.length || 0} matches`);
 
     // Map the titles from the AI response back to the full product objects
     const matched = products.filter(p => result.matches.includes(p.title) && p.imageUrl);
+
+    const totalTime = Date.now() - startTime;
+    console.log(`Total visual search time: ${totalTime}ms`);
 
     res.json({ 
       matches: matched,
       detected: result.detected || "Image analyzed",
       totalProductsSearched: products.length,
       imageSize: req.file.size,
-      imageType: mimeType
+      imageType: mimeType,
+      performanceMs: {
+        fetch: fetchTime,
+        analysis: geminiTime,
+        total: totalTime
+      }
     });
 
   } catch (err) {
@@ -267,6 +305,13 @@ router.post("/", visualSearchLimiter, upload.single('image'), async (req, res) =
       return res.status(400).json({ 
         error: "Invalid file type",
         details: "Please upload a valid image file (JPG, PNG, etc.)"
+      });
+    }
+
+    if (err.code === 'ECONNABORTED' || err.message.includes('timeout')) {
+      return res.status(504).json({ 
+        error: "Request timeout",
+        details: "Visual search took too long. Please try with a smaller image or try again later."
       });
     }
 
