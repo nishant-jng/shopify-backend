@@ -5126,5 +5126,243 @@ router.get("/customer/:customerId/supplier-info", async (req, res) => {
     });
   }
 });
+
+router.get("/customer/:customerId/compliance-data", async (req, res) => {
+  const { customerId } = req.params;
+
+  if (!customerId) {
+    return res.status(400).json({
+      error: "Invalid customerId",
+      details: "customerId is required",
+    });
+  }
+
+  try {
+    // Fetch customer metafield for the compliance Excel file
+    const customerMetafieldQuery = `
+      query getCustomerMetafield($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          email
+          metafield(namespace: "custom", key: "compliance_score") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const customerVariables = {
+      customerId: `gid://shopify/Customer/${customerId}`,
+    };
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: customerMetafieldQuery, variables: customerVariables },
+    });
+
+    const customerData = shopifyResponse.data?.data?.customer;
+    const customerEmail = customerData?.email;
+
+    if (!customerEmail) {
+      return res.status(404).json({
+        error: "Customer not found",
+        details: `No customer found with ID ${customerId}`,
+      });
+    }
+
+    const metafieldData = customerData?.metafield;
+
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Excel file not found",
+        details: "No customer metafield found for compliance data",
+      });
+    }
+
+    let fileUrl;
+
+    // Case 1: metafield type is file_reference
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile {
+              url
+            }
+            ... on MediaImage {
+              image {
+                url
+              }
+            }
+          }
+        }
+      `;
+
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+      });
+
+      fileUrl =
+        fileResponse.data?.data?.node?.url ||
+        fileResponse.data?.data?.node?.image?.url;
+
+      if (!fileUrl) {
+        return res.status(404).json({
+          error: "File URL not found",
+          details: "Could not resolve file reference metafield",
+        });
+      }
+    } else {
+      // Case 2: direct URL stored as value
+      fileUrl = metafieldData.value;
+    }
+
+    // Download the file
+    const fileResponse = await axios({
+      method: "GET",
+      url: fileUrl,
+      responseType: "arraybuffer",
+    });
+
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: false,
+    });
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({
+        error: "Empty file",
+        details: "The Excel file contains no data",
+      });
+    }
+
+    // Clean and normalize headers
+    const headers = jsonData[0].map(h =>
+      h?.toString().trim().replace(/\u00A0/g, " ")
+    );
+
+    console.log("Compliance Headers found:", headers);
+
+    const rows = jsonData.slice(1);
+
+    const parsedData = rows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] !== undefined ? row[index] : "";
+      });
+      return obj;
+    });
+
+    // Transform rows to compliance format
+    const complianceData = parsedData
+      .filter(row => row["VENDOR"]) // Only include rows with vendor names
+      .map((row, index) => {
+        // Helper function to determine compliance status
+        const getComplianceStatus = (row) => {
+          const hasAnyAudit = row["BSCI"] || row["Sedex"] || row["Sa8000"];
+          const hasExpiryDate = row["Sedex3"] || row["Sa80002"];
+
+          if (!hasAnyAudit) return "Non-Compliant";
+
+          // Check if any expiry date is in the past
+          if (hasExpiryDate) {
+            const expiryDate = row["Sedex3"] || row["Sa80002"];
+            if (expiryDate) {
+              const expiry = new Date(expiryDate);
+              const today = new Date();
+              if (expiry < today) return "Non-Compliant";
+            }
+          }
+
+          return "Compliant";
+        };
+
+        return {
+          id: index + 1,
+          vendor: row["VENDOR"] || "",
+          auditReports: {
+            bsci: row["BSCI"] || "",
+            sedex: row["Sedex"] || "",
+            sa8000: row["Sa8000"] || ""
+          },
+          expiryDates: {
+            bsci2: row["BSCI2"] || "",
+            sedex3: row["Sedex3"] || "",
+            sa80002: row["Sa80002"] || ""
+          },
+          status: getComplianceStatus(row),
+          hasActiveAudit: !!(row["BSCI"] || row["Sedex"] || row["Sa8000"])
+        };
+      });
+
+    if (complianceData.length === 0) {
+      return res.status(404).json({
+        error: "No compliance data found",
+        details: `No vendor data found in the Excel file`,
+      });
+    }
+
+    // Calculate summary statistics
+    const totalVendors = complianceData.length;
+    const compliantVendors = complianceData.filter(v => v.status === "Compliant").length;
+    const nonCompliantVendors = complianceData.filter(v => v.status === "Non-Compliant").length;
+    const complianceRate = ((compliantVendors / totalVendors) * 100).toFixed(1);
+
+    res.json({
+      success: true,
+      data: {
+        vendors: complianceData,
+        summary: {
+          totalVendors,
+          compliantVendors,
+          nonCompliantVendors,
+          complianceRate: `${complianceRate}%`
+        }
+      },
+    });
+  } catch (err) {
+    console.error("Error fetching/parsing compliance data:", err.message);
+    console.error("Full error:", err);
+
+    if (err.response?.status === 404) {
+      return res.status(404).json({
+        error: "File not found",
+        details: "The Excel file URL is not accessible",
+      });
+    }
+
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message || "An unexpected error occurred",
+    });
+  }
+});
+
+
+
+
 // Export the router to be used in server.js
 module.exports = router;
