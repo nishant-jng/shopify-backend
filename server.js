@@ -146,7 +146,7 @@ app.use("/customer-wishlist", getCustomerWishListRoutes);
 app.use('/customer-lists', customerListsRoutes); 
 app.use("/share-list", shareListRoutes);
 app.use("/visual-search", visualSearchRoutes);
-app.use("/merchants",merchantsRoutes)
+app.use("/proxy/merchants",merchantsRoutes)
 app.use('/proxy', proxyRoutes);
 
 

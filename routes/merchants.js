@@ -2,9 +2,8 @@ const express = require('express')
 const router = express.Router()
 const supabase = require('../supabaseClient')
 const upload = require('../upload')
-const { authenticateManualHmac } = require('../middleware/authenticate')
 
-router.post('/upload-po', authenticateManualHmac, upload.single('poFile'), async (req, res) => {
+router.post('/upload-po',upload.single('poFile'), async (req, res) => {
   let filePath = null
 
   try {
