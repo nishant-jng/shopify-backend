@@ -8,7 +8,7 @@ router.post('/upload-po',upload.single('poFile'), async (req, res) => {
 
   try {
     const { buyerName, poReceivedDate } = req.body
-    const { createdBy} = req.querys
+    const { createdBy} = req.query
     const file = req.file
 
     console.log('QUERY:', req.query)
