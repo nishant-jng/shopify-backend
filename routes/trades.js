@@ -30,4 +30,14 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/ip-test', async (req, res) => {
+  try {
+    const r = await axios.get("https://api.ipify.org?format=json");
+    res.json(r.data);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+
 module.exports = router;
