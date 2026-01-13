@@ -211,8 +211,8 @@ router.post('/create', async (req, res) => {
     }
 
     // 6. Create metafield definition using GraphQL
-    const safeListKey = listName.toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
+    const safeListKey = listName
+      .replace(/[^a-z0-9]+/g, '_') 
       .replace(/^_|_$/g, '')
       .substring(0, 30);
 
