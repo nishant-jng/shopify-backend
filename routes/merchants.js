@@ -5,6 +5,7 @@ const upload = require('../upload')
 
 router.post('/upload-po', upload.single('poFile'), async (req, res) => {
   let filePath = null
+  const BUCKET_NAME = 'POFY26' // Updated bucket name
 
   try {
     const { buyerName, poReceivedDate } = req.body
@@ -21,26 +22,30 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
       })
     }
 
-    // ---- Format date to MMM-DD-YYYY ----
-    function formatDate(dateString) {
-      const date = new Date(dateString)
-      const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-      const month = months[date.getMonth()]
-      const day = String(date.getDate()).padStart(2, '0')
-      const year = date.getFullYear()
-      return `${month}-${day}-${year}`
-    }
+    // ---- Date Helpers ----
+    const dateObj = new Date(poReceivedDate)
+    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+    const month = months[dateObj.getMonth()]
+    const day = String(dateObj.getDate()).padStart(2, '0')
+    const year = dateObj.getFullYear()
 
-    const formattedDate = formatDate(poReceivedDate)
+    // 1. Date format for Database (e.g., Jan-15-2026)
+    const dbFormattedDate = `${month}-${day}-${year}`
 
-    // ---- 1. Upload file to Supabase Storage ----
-    const safeBuyer = buyerName.replace(/[^a-zA-Z0-9_-]/g, '_')
+    // 2. Date format for Folder Structure (e.g., "Jan - 15")
+    const folderDateName = `${month} - ${day}`
+
+    // ---- Upload file to Supabase Storage (POFY26) ----
+
+    // Sanitize names to prevent path issues
+    const safeBuyer = buyerName.replace(/[^a-zA-Z0-9 _-]/g, '').trim() // Allow spaces for folder readability
     const safeName = file.originalname.replace(/\s+/g, '_')
 
-    filePath = `${safeBuyer}/po_${Date.now()}_${safeName}`
+    // Construct Path: Buyer Name / Month - DD / Filename
+    filePath = `${safeBuyer}/${folderDateName}/po_${Date.now()}_${safeName}`
 
     const { error: uploadError } = await supabase.storage
-      .from('documents')
+      .from(BUCKET_NAME) // ✅ Changed to POFY26
       .upload(filePath, file.buffer, {
         contentType: file.mimetype,
         upsert: false,
@@ -49,17 +54,17 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
     if (uploadError) throw uploadError
 
     const { data: publicUrlData } = supabase.storage
-      .from('documents')
+      .from(BUCKET_NAME) // ✅ Changed to POFY26
       .getPublicUrl(filePath)
 
     const poFileUrl = publicUrlData.publicUrl
 
-    // ---- 2. Insert PO into DB with formatted date ----
+    // ---- Insert PO into DB ----
     const { data: poRows, error: insertError } = await supabase
       .from('purchase_orders')
       .insert([{
         buyer_name: buyerName,
-        po_received_date: formattedDate, // ✅ Use formatted date
+        po_received_date: dbFormattedDate, 
         created_by: createdBy,
         po_file_url: poFileUrl,
       }])
@@ -69,10 +74,11 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
 
     const po = poRows[0]
 
+    // ---- Handle Alerts (Shopify Admin) ----
     const shopifyAdminCustomers = await getShopifyAdminCustomers()
 
     if (shopifyAdminCustomers.length > 0) {
-      const alertMessage = `PO received for ${buyerName} by ${createdBy} on ${formattedDate}`
+      const alertMessage = `PO received for ${buyerName} by ${createdBy} on ${dbFormattedDate}`
       const alertInserts = shopifyAdminCustomers.map(customer => ({
         message: alertMessage,
         po_id: po.id,
@@ -105,13 +111,13 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
 
     // ---- Rollback file if DB failed ----
     if (filePath) {
-      await supabase.storage.from('documents').remove([filePath])
+      // ✅ Ensure rollback deletes from the correct bucket
+      await supabase.storage.from(BUCKET_NAME).remove([filePath])
     }
 
     res.status(500).json({ error: err.message || 'Upload failed' })
   }
 })
-
 
 
 async function getShopifyAdminCustomers() {
