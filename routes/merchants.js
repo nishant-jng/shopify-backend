@@ -21,31 +21,28 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
         error: 'Missing required fields',
       })
     }
-
     // ---- Date Helpers ----
     const dateObj = new Date(poReceivedDate)
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-    const month = months[dateObj.getMonth()]
-    const day = String(dateObj.getDate()).padStart(2, '0')
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+
+    const monthFolder = months[dateObj.getMonth()] // e.g., "January"
+    const dayFolder = String(dateObj.getDate()).padStart(2, '0') // e.g., "15"
     const year = dateObj.getFullYear()
 
-    // 1. Date format for Database (e.g., Jan-15-2026)
-    const dbFormattedDate = `${month}-${day}-${year}`
-
-    // 2. Date format for Folder Structure (e.g., "Jan - 15")
-    const folderDateName = `${month} - ${day}`
+    // 1. Date format for Database record
+    const dbFormattedDate = `${monthFolder}-${dayFolder}-${year}`
 
     // ---- Upload file to Supabase Storage (POFY26) ----
 
     // Sanitize names to prevent path issues
-    const safeBuyer = buyerName.replace(/[^a-zA-Z0-9 _-]/g, '').trim() // Allow spaces for folder readability
+    const safeBuyer = buyerName.replace(/[^a-zA-Z0-9 _-]/g, '').trim() 
     const safeName = file.originalname.replace(/\s+/g, '_')
 
-    // Construct Path: Buyer Name / Month - DD / Filename
-    filePath = `${safeBuyer}/${folderDateName}/po_${Date.now()}_${safeName}`
+    // ✅ New Path: Buyer Name / Month / Day / po_timestamp_filename
+    filePath = `${safeBuyer}/${monthFolder}/${dayFolder}/po_${Date.now()}_${safeName}`
 
     const { error: uploadError } = await supabase.storage
-      .from(BUCKET_NAME) // ✅ Changed to POFY26
+      .from(BUCKET_NAME)
       .upload(filePath, file.buffer, {
         contentType: file.mimetype,
         upsert: false,
