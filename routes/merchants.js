@@ -8,7 +8,7 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
   const BUCKET_NAME = 'POFY26' // Updated bucket name
 
   try {
-    const { buyerName, poReceivedDate } = req.body
+    const { buyerName, poReceivedDate, quantity, value } = req.body
     const { createdBy } = req.query
     const file = req.file
 
@@ -16,7 +16,7 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
     console.log('BODY:', req.body)
     console.log('FILE:', req.file)
 
-    if (!buyerName || !poReceivedDate || !file || !createdBy) {
+    if (!buyerName || !poReceivedDate || !file || !createdBy || !quantity || !value) {
       return res.status(400).json({
         error: 'Missing required fields',
       })
@@ -64,6 +64,8 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
         po_received_date: dbFormattedDate, 
         created_by: createdBy,
         po_file_url: poFileUrl,
+        quantity_ordered: quantity,
+        amount: value
       }])
       .select()
 
@@ -195,6 +197,8 @@ router.get('/alerts', async (req, res) => {
           buyer_name,
           po_received_date,
           po_file_url,
+          quantity_ordered,
+          amount,
           created_by
         )
       `)
