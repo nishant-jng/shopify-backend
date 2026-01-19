@@ -41,12 +41,12 @@ async function fetchProductsForCapsules() {
                   }
                 }
               }
-              images(first: 1) { 
-                edges { 
-                  node { 
-                    url 
-                  } 
-                } 
+              images(first: 1) {
+                edges {
+                  node {
+                    url
+                  }
+                }
               }
               priceRangeV2 {
                 minVariantPrice { amount currencyCode }
@@ -78,7 +78,7 @@ async function fetchProductsForCapsules() {
     });
 
     const { data, errors } = response.data;
-    
+
     if (errors) {
       console.error('GraphQL errors:', errors);
       break;
@@ -91,9 +91,9 @@ async function fetchProductsForCapsules() {
         return node.variants.edges.map(variantEdge => ({
           id: `${node.id}-${variantEdge.node.id}`,
           handle: node.handle,
-         title: variantEdge.node.title === "Default Title"
-  ? node.title
-  : `${node.title} - ${variantEdge.node.title}`,
+          title: variantEdge.node.title === "Default Title"
+            ? node.title
+            : `${node.title} - ${variantEdge.node.title}`,
 
           productTitle: node.title,
           variantTitle: variantEdge.node.title,
@@ -151,10 +151,10 @@ Instructions:
 1. Analyze user intent and find products that best match their search
 2. Consider product title, type, vendor, tags, description, and availability
 3. Look for synonyms and related terms
-4. Return ONLY titles of products that are strong matches
+4. Return titles of products that are matches even partially
 5. Prioritize available products over out-of-stock items
 6. If nothing matches well, return empty array
-7. Maximum 5 best matches
+7. Maximum 10 best matches
 
 Output must be strictly valid JSON only. No explanations.
 Output JSON format: { "matches": ["Product Title 1","Product Title 2"] }
@@ -206,7 +206,7 @@ router.post("/", searchLimiter, async (req, res) => {
     const result = await geminiSearch(query, products);
 
     // Map the titles from the AI response back to the full product objects
-   const matched = products.filter(p => result.matches.includes(p.title) && p.imageUrl);
+    const matched = products.filter(p => result.matches.includes(p.title) && p.imageUrl);
 
 
     res.json({ 
