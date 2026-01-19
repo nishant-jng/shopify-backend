@@ -390,7 +390,7 @@ async function geminiSearch(userQuery, products) {
     // UPDATED MODEL: Using gemini-1.5-flash for better stability and context handling than 2.5-lite
     // We also set temperature to 0 for deterministic results
     const resp = await axios.post(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
       {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
