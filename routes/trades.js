@@ -5,11 +5,12 @@ const axios = require('axios');
 router.get('/', async (req, res) => {
   try {
     const response = await axios.get(
-      "https://api-v1.eximtradedata.com/EximAPI/key-A87U25H12@e$3/india/import/2025-01-01/2025-04-30/0-2/and/hs_code-30/and/importer_Name-tata/and/declaration_Number-9801874",
+      "https://eximtradedata.com/EximAPI/key-A87U25H12@e$3/india/export/2020-06-15/2022-06-25/0-10/",
     );
 
     console.log("API Data:", response.data);
     res.json(response.data);
+    // "https://api-v1.eximtradedata.com/EximAPI/key-A87U25H12@e$3/india/import/2025-01-01/2025-04-30/0-2/and/hs_code-30/and/importer_Name-tata/and/declaration_Number-9801874",
    
   } catch (error) {
     console.error("Status:", error.response?.status);
