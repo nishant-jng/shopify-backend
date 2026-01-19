@@ -230,23 +230,23 @@ const router = express.Router();
 // Get credentials from environment variables
 const { SHOPIFY_STORE, SHOPIFY_ADMIN_TOKEN, GEMINI_API_KEY } = process.env;
 
-// --- GLOBAL CACHE VARIABLES ---
-// This prevents fetching from Shopify on every single request
+// --- 1. GLOBAL CACHE (The Speed Fix) ---
+// We store products in memory so we don't ask Shopify for them on every single search.
 let productCache = null;
 let lastCacheTime = 0;
-const CACHE_DURATION = 1000 * 60 * 60; // 1 hour in milliseconds
+const CACHE_DURATION = 1000 * 60 * 60; // 1 Hour
 
 // --- Helper Functions ---
 
 async function fetchProductsForCapsules() {
-  // 1. Check Cache
+  // Check if we have valid cached data
   const now = Date.now();
   if (productCache && (now - lastCacheTime < CACHE_DURATION)) {
-    console.log("Serving products from cache...");
+    console.log("⚡ Serving products from memory cache (Fast)...");
     return productCache;
   }
 
-  console.log("Fetching fresh products from Shopify...");
+  console.log("🔄 Fetching fresh products from Shopify (This happens once per hour)...");
   let allProducts = [];
   let hasNextPage = true;
   let cursor = null;
@@ -262,25 +262,18 @@ async function fetchProductsForCapsules() {
               vendor
               tags
               description
-              status
               productType
               onlineStoreUrl
               variants(first: 10) {
                 edges {
                   node {
-                    id
-                    title
-                    price
-                    sku
-                    inventoryQuantity
                     availableForSale
+                    price
                   }
                 }
               }
               images(first: 1) { 
-                edges { 
-                  node { url } 
-                } 
+                edges { node { url } }
               }
               priceRangeV2 {
                 minVariantPrice { amount currencyCode }
@@ -296,106 +289,90 @@ async function fetchProductsForCapsules() {
       }
     `;
 
-    const variables = {
-      first: 250,
-      after: cursor
-    };
-
     try {
       const response = await axios({
         method: "POST",
-        url: `https://${SHOPIFY_STORE}/admin/api/2024-01/graphql.json`, // Use a stable API version
+        url: `https://${SHOPIFY_STORE}/admin/api/2024-01/graphql.json`,
         headers: {
           "Content-Type": "application/json",
           "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN
         },
-        data: { query, variables }
+        data: { query, variables: { first: 250, after: cursor } }
       });
 
       const { data, errors } = response.data;
-      
-      if (errors) {
-        console.error('GraphQL errors:', errors);
-        break;
-      }
+      if (errors) throw new Error(JSON.stringify(errors));
 
-      // Process products - Simplified structure for the AI
-      // We only need one entry per product unless variants are wildly different
-      const products = data.products.edges.map(({ node }) => {
-        const price = node.priceRangeV2?.minVariantPrice?.amount || "0";
-        const currency = node.priceRangeV2?.minVariantPrice?.currencyCode || "USD";
-        
-        return {
-          id: node.id, // KEEP THE SHOPIFY GID
-          title: node.title,
-          vendor: node.vendor,
-          tags: node.tags || [],
-          productType: node.productType,
-          summary: node.description ? node.description.slice(0, 150).replace(/\n/g, " ") : "", // Cleanup text
-          imageUrl: node.images.edges[0]?.node?.url || null,
-          price: price,
-          currency: currency,
-          available: node.variants?.edges?.some(e => e.node.availableForSale) || false
-        };
-      });
+      // Flatten data for the AI to read easily
+      const products = data.products.edges.map(({ node }) => ({
+        id: node.id,
+        title: node.title,
+        // We clean the description to save tokens but keep the meaning
+        description: node.description ? node.description.replace(/(<([^>]+)>)/gi, "").slice(0, 300) : "",
+        tags: node.tags || [],
+        productType: node.productType,
+        imageUrl: node.images.edges[0]?.node?.url || null,
+        price: node.priceRangeV2?.minVariantPrice?.amount,
+        currency: node.priceRangeV2?.minVariantPrice?.currencyCode,
+        isAvailable: node.variants?.edges?.some(e => e.node.availableForSale)
+      }));
 
       allProducts.push(...products);
-
       hasNextPage = data.products.pageInfo.hasNextPage;
       cursor = data.products.pageInfo.endCursor;
+
     } catch (error) {
-      console.error("Error fetching Shopify products:", error);
-      break; 
+      console.error("❌ Shopify Fetch Error:", error.message);
+      break;
     }
   }
 
-  // 2. Set Cache
+  // Update Cache
   productCache = allProducts;
   lastCacheTime = now;
   return allProducts;
 }
 
-// Enhanced Gemini search
+// --- 2. THE AI BRAIN (The Logic Fix) ---
 async function geminiSearch(userQuery, products) {
-  // Filter products to reduce token count (remove products with no image or unavailable if you prefer)
-  const availableProducts = products.filter(p => p.imageUrl); 
+  // Only search available products that have images
+  const searchableProducts = products.filter(p => p.imageUrl && p.isAvailable);
 
-  // We construct a lighter map for the AI to read. 
-  // IMPORTANT: We ask the AI to return the ID, not the title.
-  const productListText = availableProducts.map(
-    p => `ID: ${p.id} | Name: ${p.title} | Type: ${p.productType} | Tags: ${p.tags.join(", ")} | Desc: ${p.summary} | Price: ${p.price}`
+  // We feed the AI a condensed list of products so it can "Understand" them.
+  const productContext = searchableProducts.map((p, index) =>
+    `ID: ${p.id} | Name: ${p.title} | Type: ${p.productType} | Tags: ${p.tags.join(", ")} | Desc: ${p.description}`
   ).join("\n");
 
   const prompt = `
-    You are a search engine for an e-commerce store.
+    You are an intelligent personal shopping assistant.
+    The user is searching for: "${userQuery}"
+
+    YOUR JOB:
+    Identify products from the list below that match the user's *intent*, not just their keywords.
     
-    User Query: "${userQuery}"
+    RULES:
+    1. Understand Synonyms: If user asks for "kicks", find shoes/sneakers.
+    2. Understand Vibe: If user asks for "party wear", look for dresses, suits, or stylish items.
+    3. Understand Needs: If user asks for "something for cold weather", find jackets, hoodies, or sweaters.
+    4. Rank results by relevance.
+    5. Return up to 15 matching Product IDs.
     
-    Task: Return a JSON object containing a list of Product IDs that match the user's intent.
-    
-    Rules:
-    1. Analyze the User Query for intent (category, color, price, style, occasion).
-    2. Select up to 6 products from the list below that best match.
-    3. Sort them by relevance (most relevant first).
-    4. Return ONLY valid JSON.
-    
-    Product List:
-    ${productListText}
-    
-    Output Format:
-    { "matchIds": ["gid://shopify/Product/123456789", "gid://shopify/Product/987654321"] }
+    PRODUCT LIST:
+    ${productContext}
+
+    OUTPUT FORMAT:
+    Return strictly JSON: { "matchIds": ["gid://shopify/Product/123", "gid://shopify/Product/456"] }
   `;
 
   try {
-    // UPDATED MODEL: Using gemini-1.5-flash for better stability and context handling than 2.5-lite
-    // We also set temperature to 0 for deterministic results
+    // We use gemini-1.5-flash because it handles large contexts (lists of products) much better than 2.5-lite
     const resp = await axios.post(
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
       {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
-            temperature: 0.0,
-            responseMimeType: "application/json" // Forces JSON output
+          temperature: 0.3, // A little creativity allowed for semantic matching
+          responseMimeType: "application/json"
         }
       },
       { headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY } }
@@ -403,56 +380,52 @@ async function geminiSearch(userQuery, products) {
 
     const rawText = resp.data.candidates?.[0]?.content?.parts?.[0]?.text;
     const json = JSON.parse(rawText);
-    return json.matchIds || []; // Expecting matchIds array
+    return json.matchIds || [];
 
   } catch (e) {
-    console.error("Gemini API Error:", e.response?.data || e.message);
+    console.error("❌ Gemini AI Error:", e.response?.data || e.message);
     return [];
   }
 }
 
 // --- Rate Limiter ---
 const searchLimiter = rateLimit({
-  windowMs: 60 * 1000, 
-  max: 10, // Increased slightly
+  windowMs: 60 * 1000,
+  max: 10,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { error: "Too many requests, please slow down." }
 });
 
-// --- Main Route ---
+// --- API Route ---
 router.post("/", searchLimiter, async (req, res) => {
   try {
     const { query } = req.body;
-    
-    if (!query) {
-      return res.status(400).json({ error: "Missing query" });
-    }
+    if (!query) return res.status(400).json({ error: "Missing query" });
 
-    // 1. Get products (Instant if cached)
+    // 1. Get products (Instant from cache)
     const products = await fetchProductsForCapsules();
 
-    // 2. Get AI matches (IDs)
+    // 2. Ask AI which IDs match the user's intent
     const matchIds = await geminiSearch(query, products);
 
-    // 3. Map IDs back to full product objects
-    // We map strictly based on the ID returned by AI
+    // 3. Retrieve the full product details for those IDs
+    // Note: We are filtering by ID, but the AI selected these IDs based on *meaning*
     const matchedProducts = products.filter(p => matchIds.includes(p.id));
 
-    // Optional: Sort the results in the order the AI returned them
+    // Sort them in the order the AI returned them (Relevance)
     const sortedMatches = matchIds
-        .map(id => matchedProducts.find(p => p.id === id))
-        .filter(p => p !== undefined); // remove any failed lookups
+      .map(id => matchedProducts.find(p => p.id === id))
+      .filter(p => p); // Remove undefined
 
-    res.json({ 
+    res.json({
       matches: sortedMatches,
       totalProductsSearched: products.length,
       searchQuery: query
     });
 
   } catch (err) {
-    console.error("Search route error:", err.message);
-    res.status(500).json({ error: "Internal Server Error", details: err.message });
+    console.error("Search failed:", err.message);
+    res.status(500).json({ error: "Internal Server Error" });
   }
 });
 
