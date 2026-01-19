@@ -333,57 +333,79 @@ async function fetchProductsForCapsules() {
   return allProducts;
 }
 
-// --- 2. THE AI BRAIN (The Logic Fix) ---
+// --- 2. THE ROBUST AI BRAIN ---
 async function geminiSearch(userQuery, products) {
-  // Only search available products that have images
-  const searchableProducts = products.filter(p => p.imageUrl && p.isAvailable);
+  // 1. Prepare the data (Limit to essential fields to save token usage)
+  const searchableProducts = products
+    .filter(p => p.imageUrl && p.isAvailable)
+    .map(p => ({
+      id: p.id,
+      txt: `${p.title} | ${p.productType} | ${p.tags.join(", ")} | ${p.description}`
+    }));
 
-  // We feed the AI a condensed list of products so it can "Understand" them.
-  const productContext = searchableProducts.map((p, index) =>
-    `ID: ${p.id} | Name: ${p.title} | Type: ${p.productType} | Tags: ${p.tags.join(", ")} | Desc: ${p.description}`
-  ).join("\n");
+  if (searchableProducts.length === 0) {
+    console.log("⚠️ No available products with images found.");
+    return [];
+  }
 
+  // 2. Construct Prompt
   const prompt = `
-    You are an intelligent personal shopping assistant.
-    The user is searching for: "${userQuery}"
-
-    YOUR JOB:
-    Identify products from the list below that match the user's *intent*, not just their keywords.
+    You are a smart shopping assistant.
+    Query: "${userQuery}"
     
-    RULES:
-    1. Understand Synonyms: If user asks for "kicks", find shoes/sneakers.
-    2. Understand Vibe: If user asks for "party wear", look for dresses, suits, or stylish items.
-    3. Understand Needs: If user asks for "something for cold weather", find jackets, hoodies, or sweaters.
-    4. Rank results by relevance.
-    5. Return up to 15 matching Product IDs.
+    Task: Find up to 15 Product IDs from the list below that match the query.
+    Rules:
+    - Return ONLY valid JSON.
+    - Do NOT include markdown formatting (like \`\`\`json).
+    - If "kitchen" is asked, look for keywords: cook, pan, knife, spoon, bowl, appliance, chef, food.
     
-    PRODUCT LIST:
-    ${productContext}
-
-    OUTPUT FORMAT:
-    Return strictly JSON: { "matchIds": ["gid://shopify/Product/123", "gid://shopify/Product/456"] }
+    Products:
+    ${searchableProducts.map(p => `ID: ${p.id} -- ${p.txt}`).join("\n")}
+    
+    Output Format:
+    { "matchIds": ["gid://shopify/Product/...", "gid://shopify/Product/..."] }
   `;
 
   try {
-    // We use gemini-1.5-flash because it handles large contexts (lists of products) much better than 2.5-lite
     const resp = await axios.post(
       "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent",
       {
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         generationConfig: {
-          temperature: 0.3, // A little creativity allowed for semantic matching
+          temperature: 0.1, // Lower temperature = more strict JSON
           responseMimeType: "application/json"
         }
       },
       { headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY } }
     );
 
-    const rawText = resp.data.candidates?.[0]?.content?.parts?.[0]?.text;
+    let rawText = resp.data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+    if (!rawText) {
+      console.error("❌ AI returned empty response.");
+      return [];
+    }
+
+    // --- CRITICAL FIX: CLEAN THE JSON ---
+    // Remove markdown code blocks if present
+    rawText = rawText.replace(/```json/g, "").replace(/```/g, "").trim();
+
+    console.log("🤖 AI Raw Output:", rawText.slice(0, 100) + "..."); // Debug log
+
     const json = JSON.parse(rawText);
     return json.matchIds || [];
 
   } catch (e) {
-    console.error("❌ Gemini AI Error:", e.response?.data || e.message);
+    // Detailed Error Logging
+    console.error("❌ SEARCH FAILED:");
+    if (e.response) {
+      console.error(`Status: ${e.response.status}`);
+      console.error(`Data:`, JSON.stringify(e.response.data, null, 2));
+    } else if (e instanceof SyntaxError) {
+      console.error("JSON Parse Error. AI output was likely malformed.");
+    } else {
+      console.error(e.message);
+    }
     return [];
   }
 }
