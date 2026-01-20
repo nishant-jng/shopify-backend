@@ -3526,14 +3526,13 @@ router.get("/customer/:customerId/volume-origin", async (req, res) => {
 
       return obj;
     });
-
     // FILTER DATA BY CUSTOMER'S ALLOWED BUYERS
     const filteredData = allowedBuyers.length > 0
-      ? parsedData.filter(row => {
-          const buyerName = row.buyer.replace(/ TOTAL$/, "").trim();
-          return allowedBuyers.includes(buyerName);
-        })
-      : parsedData; // If no buyers specified, return all data
+  ? parsedData.filter(row => {
+      const buyerName = row.buyer.replace(/ TOTAL$/, "").trim().toUpperCase();
+      return allowedBuyers.includes(buyerName);
+    })
+  : parsedData;
 
     console.log("Total parsed rows:", parsedData.length);
     console.log("Filtered data rows:", filteredData.length);
