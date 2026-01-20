@@ -1465,7 +1465,7 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
       header: 1,
       defval: "",
       blankrows: false,
-      raw: false,
+      raw: true,  // Changed to true to get raw numeric values
     });
 
     if (jsonData.length === 0) {
@@ -1481,13 +1481,15 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
     );
     const rows = jsonData.slice(1);
 
-    // Helper to safely parse numbers
+    // Helper to safely parse numbers - UPDATED
     const cleanNumber = (val) => {
       if (val === null || val === undefined || val === "") return 0;
       if (typeof val === "number") return val;
       if (typeof val === "string") {
-        const cleaned = val.replace(/[^0-9.\-]/g, "");
-        return cleaned ? parseFloat(cleaned) : 0;
+        // Remove currency symbols, commas, spaces
+        const cleaned = val.trim().replace(/[$,\s]/g, "");
+        const num = parseFloat(cleaned);
+        return isNaN(num) ? 0 : num;
       }
       return 0;
     };
@@ -1512,19 +1514,24 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
       });
     }
 
-    // Check if merchant handles multiple buyers
+    // Check if merchant handles multiple buyers - UPDATED
     const buyerColumn = customerRows.map(row => row["Buyer"]).filter(Boolean);
     const isMultiBuyer = buyerColumn.length > 1;
-    const hasTotal = customerRows.some(row =>
-      row["Buyer"]?.toString().toLowerCase().includes("total")
-    );
+    
+    // Normalize comparison for Total detection
+    const hasTotal = customerRows.some(row => {
+      const buyer = row["Buyer"]?.toString().trim().toUpperCase();
+      return buyer === 'TOTAL' || buyer.includes('TOTAL');
+    });
 
-    // Filter by buyer if specified
+    // Filter by buyer if specified - UPDATED WITH NORMALIZATION
     let filteredRows = customerRows;
     if (buyer && buyer !== "All") {
-      filteredRows = customerRows.filter(row =>
-        row["Buyer"]?.toString().trim() === buyer
-      );
+      const normalizedBuyer = buyer.trim().toUpperCase();
+      filteredRows = customerRows.filter(row => {
+        const rowBuyer = row["Buyer"]?.toString().trim().toUpperCase();
+        return rowBuyer === normalizedBuyer;
+      });
 
       if (filteredRows.length === 0) {
         return res.status(404).json({
@@ -1534,8 +1541,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
       }
     }
 
-    // Check if Total is selected
-    const isTotalSelected = buyer && buyer.toLowerCase().includes('total');
+    // Check if Total is selected - UPDATED
+    const isTotalSelected = buyer && buyer.trim().toUpperCase().includes('TOTAL');
 
     // Aggregate data function
     const aggregateSummary = (rows) => {
@@ -1552,8 +1559,8 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         totalSKUs: 0,
         totalConvertedSKUs: 0,
         numberOfPos: 0,
-        openPosCount:0,
-        growth:0,
+        openPosCount: 0,
+        growth: 0,
         latePos: 0,
         onTimePos: 0,
       };
@@ -1579,7 +1586,7 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         totals.totalSKUs += cleanNumber(row["Total SKUs"]);
         totals.totalConvertedSKUs += cleanNumber(row["Converted SKUs"]);
         totals.numberOfPos += cleanNumber(row["Number of Pos"]);
-        totals.openPosCount += cleanNumber(row["Open Pos count"])
+        totals.openPosCount += cleanNumber(row["Open Pos count"]);
         totals.latePos += cleanNumber(row["Late Pos"]);
         totals.onTimePos += cleanNumber(row["Ontime Pos"]);
       });
@@ -1656,7 +1663,7 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
       customerRows.map(row => row["Buyer"]).filter(Boolean)
     )).sort();
 
-    // Determine the current buyer to display
+    // Determine the current buyer to display - UPDATED WITH NORMALIZATION
     let determinedCurrentBuyer;
     if (buyer && buyer !== "All") {
       // User explicitly selected a buyer
@@ -1664,29 +1671,35 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
     } else {
       // No buyer selected - pick a default
       // PREFER Total buyer for initial load if available
-      const totalBuyer = buyersList.find(b =>
-        b.toLowerCase().includes('total')
-      );
+      const totalBuyer = buyersList.find(b => {
+        const normalized = b.trim().toUpperCase();
+        return normalized === 'TOTAL' || normalized.includes('TOTAL');
+      });
       
       if (totalBuyer) {
         // Use Total buyer first
         determinedCurrentBuyer = totalBuyer;
       } else {
         // Otherwise use first non-Total buyer
-        const nonTotalBuyers = buyersList.filter(b =>
-          !b.toLowerCase().includes('total')
-        );
+        const nonTotalBuyers = buyersList.filter(b => {
+          const normalized = b.trim().toUpperCase();
+          return !(normalized === 'TOTAL' || normalized.includes('TOTAL'));
+        });
         determinedCurrentBuyer = nonTotalBuyers[0] || buyersList[0] || "Unknown";
       }
 
       // Re-filter and re-calculate summary for the determined buyer if no buyer was specified
       if (!buyer) {
-        filteredRows = customerRows.filter(row =>
-          row["Buyer"]?.toString().trim() === determinedCurrentBuyer
-        );
+        const normalizedDetermined = determinedCurrentBuyer.trim().toUpperCase();
+        filteredRows = customerRows.filter(row => {
+          const rowBuyer = row["Buyer"]?.toString().trim().toUpperCase();
+          return rowBuyer === normalizedDetermined;
+        });
 
         // Recalculate summary for the determined buyer
-        if (determinedCurrentBuyer.toLowerCase().includes('total')) {
+        const isTotal = normalizedDetermined === 'TOTAL' || normalizedDetermined.includes('TOTAL');
+        
+        if (isTotal && filteredRows.length > 0) {
           const totalRow = filteredRows[0];
           summary = {
             totalRows: 1,
@@ -1716,6 +1729,10 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
         }
       }
     }
+
+    // Add debug logging
+    console.log("Sample row data:", filteredRows[0]);
+    console.log("Calculated summary:", summary);
 
     res.json({
       success: true,
@@ -1749,6 +1766,446 @@ router.get("/customer/:customerId/merchants-performance", async (req, res) => {
     });
   }
 });
+
+// router.get("/customer/:customerId/merchants-performance", async (req, res) => {
+//   const { customerId } = req.params;
+//   const { buyer } = req.query; // Optional buyer filter
+
+//   if (!customerId) {
+//     return res.status(400).json({
+//       error: "Invalid customerId",
+//       details: "customerId is required",
+//     });
+//   }
+
+//   try {
+//     // First, get the customer's email and buyers metafield
+//     const customerQuery = `
+//       query getCustomer($customerId: ID!) {
+//         customer(id: $customerId) {
+//           id
+//           email
+//           metafield(namespace: "custom", key: "buyers") {
+//             value
+//             type
+//           }
+//         }
+//       }
+//     `;
+
+//     const customerVariables = {
+//       customerId: `gid://shopify/Customer/${customerId}`,
+//     };
+
+//     const customerResponse = await axios({
+//       method: "POST",
+//       url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+//       headers: {
+//         "Content-Type": "application/json",
+//         "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+//       },
+//       data: {
+//         query: customerQuery,
+//         variables: customerVariables
+//       },
+//     });
+
+//     const customerData = customerResponse.data?.data?.customer;
+//     const customerEmail = customerData?.email;
+
+//     if (!customerEmail) {
+//       return res.status(404).json({
+//         error: "Customer not found",
+//         details: `No customer found with ID ${customerId}`,
+//       });
+//     }
+
+//     // Parse buyers metafield (list.single_line_text_field)
+//     let availableBuyers = [];
+//     if (customerData?.metafield?.value) {
+//       try {
+//         availableBuyers = JSON.parse(customerData.metafield.value);
+//       } catch (e) {
+//         console.warn("Failed to parse buyers metafield:", e);
+//       }
+//     }
+
+//     // Fetch shop metafield for the performance Excel file
+//     const shopMetafieldQuery = `
+//       query getShopMetafield {
+//         shop {
+//           metafield(namespace: "custom", key: "merchantperformance") {
+//             id
+//             value
+//             type
+//           }
+//         }
+//       }
+//     `;
+
+//     const shopifyResponse = await axios({
+//       method: "POST",
+//       url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+//       headers: {
+//         "Content-Type": "application/json",
+//         "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+//       },
+//       data: { query: shopMetafieldQuery },
+//     });
+
+//     const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+
+//     if (!metafieldData) {
+//       return res.status(404).json({
+//         error: "Excel file not found",
+//         details: "No shop metafield found for merchant performance",
+//       });
+//     }
+
+//     let fileUrl;
+
+//     // Case 1: metafield type is file_reference
+//     if (metafieldData.type === "file_reference") {
+//       const fileId = metafieldData.value;
+//       const fileQuery = `
+//         query getFileUrl($fileId: ID!) {
+//           node(id: $fileId) {
+//             ... on GenericFile {
+//               url
+//             }
+//             ... on MediaImage {
+//               image {
+//                 url
+//               }
+//             }
+//           }
+//         }
+//       `;
+
+//       const fileResponse = await axios({
+//         method: "POST",
+//         url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+//         headers: {
+//           "Content-Type": "application/json",
+//           "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+//         },
+//         data: {
+//           query: fileQuery,
+//           variables: { fileId }
+//         },
+//       });
+
+//       fileUrl = fileResponse.data?.data?.node?.url || fileResponse.data?.data?.node?.image?.url;
+
+//       if (!fileUrl) {
+//         return res.status(404).json({
+//           error: "File URL not found",
+//           details: "Could not resolve file reference metafield",
+//         });
+//       }
+//     } else {
+//       fileUrl = metafieldData.value;
+//     }
+
+//     // Download the file
+//     const fileResponse = await axios({
+//       method: "GET",
+//       url: fileUrl,
+//       responseType: "arraybuffer",
+//     });
+
+//     const XLSX = require("xlsx");
+//     const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+//     const sheetName = workbook.SheetNames[0];
+//     const worksheet = workbook.Sheets[sheetName];
+//     const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+//       header: 1,
+//       defval: "",
+//       blankrows: false,
+//       raw: false,
+//     });
+
+//     if (jsonData.length === 0) {
+//       return res.status(404).json({
+//         error: "Empty file",
+//         details: "The Excel file contains no data",
+//       });
+//     }
+
+//     // Clean and normalize headers
+//     const headers = jsonData[0].map(h =>
+//       h?.toString().trim().replace(/\u00A0/g, " ")
+//     );
+//     const rows = jsonData.slice(1);
+
+//     // Helper to safely parse numbers
+//     const cleanNumber = (val) => {
+//       if (val === null || val === undefined || val === "") return 0;
+//       if (typeof val === "number") return val;
+//       if (typeof val === "string") {
+//         const cleaned = val.replace(/[^0-9.\-]/g, "");
+//         return cleaned ? parseFloat(cleaned) : 0;
+//       }
+//       return 0;
+//     };
+
+//     const parsedData = rows.map((row) => {
+//       const obj = {};
+//       headers.forEach((header, index) => {
+//         obj[header] = row[index] !== undefined ? row[index] : "";
+//       });
+//       return obj;
+//     });
+
+//     // Find all rows matching customer email
+//     const customerRows = parsedData.filter(
+//       (row) => row["Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim()
+//     );
+
+//     if (customerRows.length === 0) {
+//       return res.status(404).json({
+//         error: "Customer data not found",
+//         details: `No performance data found for customer email: ${customerEmail}`,
+//       });
+//     }
+
+//     // Check if merchant handles multiple buyers
+//     const buyerColumn = customerRows.map(row => row["Buyer"]).filter(Boolean);
+//     const isMultiBuyer = buyerColumn.length > 1;
+//     const hasTotal = customerRows.some(row =>
+//       row["Buyer"]?.toString().toLowerCase().includes("total")
+//     );
+
+//     // Filter by buyer if specified
+//     let filteredRows = customerRows;
+//     if (buyer && buyer !== "All") {
+//       filteredRows = customerRows.filter(row =>
+//         row["Buyer"]?.toString().trim() === buyer
+//       );
+
+//       if (filteredRows.length === 0) {
+//         return res.status(404).json({
+//           error: "Buyer data not found",
+//           details: `No performance data found for buyer: ${buyer}`,
+//         });
+//       }
+//     }
+
+//     // Check if Total is selected
+//     const isTotalSelected = buyer && buyer.toLowerCase().includes('total');
+
+//     // Aggregate data function
+//     const aggregateSummary = (rows) => {
+//       const totals = {
+//         volumeLY25: 0,
+//         targetFY26: 0,
+//         ytdFY26: 0,
+//         totalOpenPos: 0,
+//         totalOrders: 0,
+//         otifValues: [],
+//         otifLYValues: [],
+//         totalQualityClaimsLY: 0,
+//         totalQualityClaims: 0,
+//         totalSKUs: 0,
+//         totalConvertedSKUs: 0,
+//         numberOfPos: 0,
+//         openPosCount:0,
+//         growth:0,
+//         latePos: 0,
+//         onTimePos: 0,
+//       };
+
+//       rows.forEach(row => {
+//         totals.volumeLY25 += cleanNumber(row["Volume LY25"]);
+//         totals.targetFY26 += cleanNumber(row["Target FY26"]);
+//         totals.ytdFY26 += cleanNumber(row["YTD FY26"]);
+//         totals.totalOpenPos += cleanNumber(row["Open Pos"]);
+//         totals.totalOrders += cleanNumber(row["Total orders"]);
+
+//         const otif = cleanNumber(row["OTIF"]);
+//         if (otif > 0) totals.otifValues.push(otif);
+
+//         const otifLY = cleanNumber(row["OTIF LY"]);
+//         if (otifLY > 0) totals.otifLYValues.push(otifLY);
+
+//         const growth = cleanNumber(row["Growth"]);
+//         if (growth) totals.growth += growth;
+
+//         totals.totalQualityClaimsLY += cleanNumber(row["Quality Claims LY"]);
+//         totals.totalQualityClaims += cleanNumber(row["Quality Claims"]);
+//         totals.totalSKUs += cleanNumber(row["Total SKUs"]);
+//         totals.totalConvertedSKUs += cleanNumber(row["Converted SKUs"]);
+//         totals.numberOfPos += cleanNumber(row["Number of Pos"]);
+//         totals.openPosCount += cleanNumber(row["Open Pos count"])
+//         totals.latePos += cleanNumber(row["Late Pos"]);
+//         totals.onTimePos += cleanNumber(row["Ontime Pos"]);
+//       });
+
+//       // Calculate average OTIF
+//       const avgOtif = totals.otifValues.length > 0
+//         ? totals.otifValues.reduce((a, b) => a + b, 0) / totals.otifValues.length
+//         : 0;
+
+//       const avgOtifLY = totals.otifLYValues.length > 0
+//         ? totals.otifLYValues.reduce((a, b) => a + b, 0) / totals.otifLYValues.length
+//         : 0;
+
+//       return {
+//         totalRows: rows.length,
+//         volumeLY25: totals.volumeLY25,
+//         targetFY26: totals.targetFY26,
+//         ytdActual: totals.ytdFY26,
+//         ytdFY26: totals.ytdFY26,
+//         totalOpenPos: totals.totalOpenPos,
+//         totalOrders: totals.totalOrders,
+//         otifRate: `${avgOtif.toFixed(0)}%`,
+//         otifRawAverage: avgOtif,
+//         otifLY: avgOtifLY,
+//         totalQualityClaimsLY: totals.totalQualityClaimsLY,
+//         totalQualityClaims: totals.totalQualityClaims,
+//         totalSKUs: totals.totalSKUs,
+//         totalConvertedSKUs: totals.totalConvertedSKUs,
+//         numberOfPos: totals.numberOfPos,
+//         openPosCount: totals.openPosCount,
+//         growth: totals.growth,
+//         ytdTarget: totals.targetFY26,
+//         lytd: totals.volumeLY25,
+//         latePos: totals.latePos,
+//         onTimePos: totals.onTimePos,
+//       };
+//     };
+
+//     let summary;
+
+//     // Special handling for Total buyer - use row data directly without aggregation
+//     if (isTotalSelected && filteredRows.length > 0) {
+//       const totalRow = filteredRows[0];
+//       summary = {
+//         totalRows: 1,
+//         volumeLY25: cleanNumber(totalRow["Volume LY25"]),
+//         targetFY26: cleanNumber(totalRow["Target FY26"]),
+//         ytdActual: cleanNumber(totalRow["YTD FY26"]),
+//         ytdFY26: cleanNumber(totalRow["YTD FY26"]),
+//         totalOpenPos: cleanNumber(totalRow["Open Pos"]),
+//         totalOrders: cleanNumber(totalRow["Total orders"]),
+//         otifRate: `${cleanNumber(totalRow["OTIF"]).toFixed(0)}%`,
+//         otifRawAverage: cleanNumber(totalRow["OTIF"]),
+//         otifLY: cleanNumber(totalRow["OTIF LY"]),
+//         totalQualityClaimsLY: cleanNumber(totalRow["Quality Claims LY"]),
+//         totalQualityClaims: cleanNumber(totalRow["Quality Claims"]),
+//         totalSKUs: cleanNumber(totalRow["Total SKUs"]),
+//         totalConvertedSKUs: cleanNumber(totalRow["Converted SKUs"]),
+//         numberOfPos: cleanNumber(totalRow["Number of Pos"]),
+//         openPosCount: cleanNumber(totalRow["Open Pos count"]),
+//         growth: cleanNumber(totalRow["Growth"]),
+//         ytdTarget: cleanNumber(totalRow["Target FY26"]),
+//         lytd: cleanNumber(totalRow["Volume LY25"]),
+//         latePos: cleanNumber(totalRow["Late Pos"]),
+//         onTimePos: cleanNumber(totalRow["Ontime Pos"]),
+//       };
+//     } else {
+//       // Use aggregation for non-Total buyers
+//       summary = aggregateSummary(filteredRows);
+//     }
+
+//     // Get list of buyers for this merchant
+//     const buyersList = Array.from(new Set(
+//       customerRows.map(row => row["Buyer"]).filter(Boolean)
+//     )).sort();
+
+//     // Determine the current buyer to display
+//     let determinedCurrentBuyer;
+//     if (buyer && buyer !== "All") {
+//       // User explicitly selected a buyer
+//       determinedCurrentBuyer = buyer;
+//     } else {
+//       // No buyer selected - pick a default
+//       // PREFER Total buyer for initial load if available
+//       const totalBuyer = buyersList.find(b =>
+//         b.toLowerCase().includes('total')
+//       );
+      
+//       if (totalBuyer) {
+//         // Use Total buyer first
+//         determinedCurrentBuyer = totalBuyer;
+//       } else {
+//         // Otherwise use first non-Total buyer
+//         const nonTotalBuyers = buyersList.filter(b =>
+//           !b.toLowerCase().includes('total')
+//         );
+//         determinedCurrentBuyer = nonTotalBuyers[0] || buyersList[0] || "Unknown";
+//       }
+
+//       // Re-filter and re-calculate summary for the determined buyer if no buyer was specified
+//       if (!buyer) {
+//         filteredRows = customerRows.filter(row =>
+//           row["Buyer"]?.toString().trim() === determinedCurrentBuyer
+//         );
+
+//         // Recalculate summary for the determined buyer
+//         if (determinedCurrentBuyer.toLowerCase().includes('total')) {
+//           const totalRow = filteredRows[0];
+//           summary = {
+//             totalRows: 1,
+//             volumeLY25: cleanNumber(totalRow["Volume LY25"]),
+//             targetFY26: cleanNumber(totalRow["Target FY26"]),
+//             ytdActual: cleanNumber(totalRow["YTD FY26"]),
+//             ytdFY26: cleanNumber(totalRow["YTD FY26"]),
+//             totalOpenPos: cleanNumber(totalRow["Open Pos"]),
+//             totalOrders: cleanNumber(totalRow["Total orders"]),
+//             otifRate: `${cleanNumber(totalRow["OTIF"]).toFixed(0)}%`,
+//             otifRawAverage: cleanNumber(totalRow["OTIF"]),
+//             otifLY: cleanNumber(totalRow["OTIF LY"]),
+//             totalQualityClaimsLY: cleanNumber(totalRow["Quality Claims LY"]),
+//             totalQualityClaims: cleanNumber(totalRow["Quality Claims"]),
+//             totalSKUs: cleanNumber(totalRow["Total SKUs"]),
+//             totalConvertedSKUs: cleanNumber(totalRow["Converted SKUs"]),
+//             numberOfPos: cleanNumber(totalRow["Number of Pos"]),
+//             openPosCount: cleanNumber(totalRow["Open Pos count"]),
+//             growth: cleanNumber(totalRow["Growth"]),
+//             ytdTarget: cleanNumber(totalRow["Target FY26"]),
+//             lytd: cleanNumber(totalRow["Volume LY25"]),
+//             latePos: cleanNumber(totalRow["Late Pos"]),
+//             onTimePos: cleanNumber(totalRow["Ontime Pos"]),
+//           };
+//         } else {
+//           summary = aggregateSummary(filteredRows);
+//         }
+//       }
+//     }
+
+//     res.json({
+//       success: true,
+//       data: {
+//         headers,
+//         rows: filteredRows,
+//         summary,
+//         rowCount: filteredRows.length,
+//         isMultiBuyer,
+//         hasTotal,
+//         availableBuyers: buyersList,
+//         currentBuyer: determinedCurrentBuyer,
+//         metafieldBuyers: availableBuyers,
+//       },
+//     });
+
+//   } catch (err) {
+//     console.error("Error fetching/parsing Excel file:", err.message);
+//     console.error("Full error:", err);
+
+//     if (err.response?.status === 404) {
+//       return res.status(404).json({
+//         error: "File not found",
+//         details: "The Excel file URL is not accessible",
+//       });
+//     }
+
+//     return res.status(500).json({
+//       error: "Failed to fetch or parse Excel file",
+//       details: err.message || "An unexpected error occurred",
+//     });
+//   }
+// });
 
 // router.get("/customer/:customerId/merchants-performance", async (req, res) => {
 //   const { customerId } = req.params;
