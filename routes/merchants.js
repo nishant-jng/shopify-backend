@@ -119,6 +119,105 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
 })
 
 
+router.post('/upload-pi', upload.single('piFile'), async (req, res) => {
+  let filePath = null
+  const BUCKET_NAME = 'POFY26'
+
+  try {
+    const { poId, piReceivedDate } = req.body
+    const file = req.file
+
+    console.log('BODY:', req.body)
+    console.log('FILE:', req.file)
+
+    if (!poId || !piReceivedDate || !file) {
+      return res.status(400).json({
+        error: 'Missing required fields: poId, piReceivedDate, or piFile',
+      })
+    }
+
+    // ---- Fetch existing PO to get the directory path ----
+    const { data: poData, error: fetchError } = await supabase
+      .from('purchase_orders')
+      .select('po_file_url, buyer_name')
+      .eq('id', poId)
+      .single()
+
+    if (fetchError || !poData) {
+      return res.status(404).json({ error: 'Purchase Order not found' })
+    }    
+    const urlParts = poData.po_file_url.split('/')
+    const bucketIndex = urlParts.indexOf(BUCKET_NAME)
+    
+    if (bucketIndex === -1) {
+      throw new Error('Could not parse PO file path from URL')
+    }
+
+    // Extract path segments after bucket name until the filename
+    const pathSegments = urlParts.slice(bucketIndex + 1, -1) // Exclude filename
+    const directoryPath = pathSegments.join('/')
+
+    // ---- Upload PI file to the same directory ----
+    const safeName = file.originalname.replace(/\s+/g, '_')
+    filePath = `${directoryPath}/pi_${Date.now()}_${safeName}`
+
+    const { error: uploadError } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(filePath, file.buffer, {
+        contentType: file.mimetype,
+        upsert: false,
+      })
+
+    if (uploadError) throw uploadError
+
+    const { data: publicUrlData } = supabase.storage
+      .from(BUCKET_NAME)
+      .getPublicUrl(filePath)
+
+    const piFileUrl = publicUrlData.publicUrl
+
+    // ---- Format PI received date ----
+    const dateObj = new Date(piReceivedDate)
+    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+    const monthFolder = months[dateObj.getMonth()]
+    const dayFolder = String(dateObj.getDate()).padStart(2, '0')
+    const year = dateObj.getFullYear()
+    const dbFormattedDate = `${monthFolder}-${dayFolder}-${year}`
+
+    // ---- Update PO record with PI details ----
+    const { data: updatedPO, error: updateError } = await supabase
+      .from('purchase_orders')
+      .update({
+        pi_received_date: dbFormattedDate,
+        pi_file_url: piFileUrl,
+        pi_confirmed: true
+      })
+      .eq('id', poId)
+      .select()
+
+    if (updateError) throw updateError
+
+    // ---- Success ----
+    return res.json({
+      success: true,
+      poId: poId,
+      message: 'PI uploaded and PO updated successfully',
+      piFileUrl: piFileUrl
+    })
+
+  } catch (err) {
+    console.error('PI Upload Error:', err)
+
+    // ---- Rollback file if DB update failed ----
+    if (filePath) {
+      await supabase.storage.from(BUCKET_NAME).remove([filePath])
+    }
+
+    res.status(500).json({ error: err.message || 'PI upload failed' })
+  }
+})
+
+
 async function getShopifyAdminCustomers() {
   try {
     // Using Shopify Admin API (GraphQL)
