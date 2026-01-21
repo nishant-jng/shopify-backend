@@ -318,6 +318,45 @@ router.get('/alerts', async (req, res) => {
   }
 })
 
+router.get('/my-pos', async (req, res) => {
+  try {
+    const { createdBy } = req.query;
+
+    console.log('Fetching POs for:', createdBy);
+
+    if (!createdBy) {
+      return res.status(400).json({
+        error: 'Missing createdBy parameter'
+      });
+    }
+
+    // Fetch POs created by this customer
+    const { data: pos, error } = await supabase
+      .from('purchase_orders')
+      .select('*')
+      .eq('created_by', createdBy)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+
+    console.log(`✅ Found ${pos.length} POs for ${createdBy}`);
+
+    return res.json({
+      success: true,
+      pos: pos,
+      count: pos.length
+    });
+
+  } catch (err) {
+    console.error('Fetch POs Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to fetch POs' });
+  }
+});
+
+
+
+
+
 // Mark single alert as read
 router.post('/alerts/:alertId/read', async (req, res) => {
   try {
