@@ -119,18 +119,21 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
 })
 
 
-router.post('/upload-pi', upload.single('piFile'), async (req, res) => {
+router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
   let filePath = null
   const BUCKET_NAME = 'POFY26'
 
   try {
-    const { poId, piReceivedDate } = req.body
+    const databasePoId = req.params.poId  // Get from URL parameter
+    const { poId: userPoNumber, piReceivedDate } = req.body  // poId from form is actually the PO number
     const file = req.file
 
+    console.log('DATABASE PO ID:', databasePoId)
+    console.log('USER PO NUMBER:', userPoNumber)
     console.log('BODY:', req.body)
     console.log('FILE:', req.file)
 
-    if (!poId || !piReceivedDate || !file) {
+    if (!databasePoId || !userPoNumber || !piReceivedDate || !file) {
       return res.status(400).json({
         error: 'Missing required fields: poId, piReceivedDate, or piFile',
       })
@@ -140,7 +143,7 @@ router.post('/upload-pi', upload.single('piFile'), async (req, res) => {
     const { data: poData, error: fetchError } = await supabase
       .from('purchase_orders')
       .select('po_file_url, buyer_name')
-      .eq('id', poId)
+      .eq('id', databasePoId)  // Use database ID from URL
       .single()
 
     if (fetchError || !poData) {
@@ -190,9 +193,10 @@ router.post('/upload-pi', upload.single('piFile'), async (req, res) => {
       .update({
         pi_received_date: dbFormattedDate,
         pi_file_url: piFileUrl,
+        po_number: userPoNumber,  // Use the user-entered PO number
         pi_confirmed: true
       })
-      .eq('id', poId)
+      .eq('id', databasePoId)  // Use database ID from URL
       .select()
 
     if (updateError) throw updateError
@@ -200,7 +204,7 @@ router.post('/upload-pi', upload.single('piFile'), async (req, res) => {
     // ---- Success ----
     return res.json({
       success: true,
-      poId: poId,
+      poId: databasePoId,
       message: 'PI uploaded and PO updated successfully',
       piFileUrl: piFileUrl
     })
