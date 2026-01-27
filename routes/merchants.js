@@ -124,8 +124,8 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
   const BUCKET_NAME = 'POFY26'
 
   try {
-    const databasePoId = req.params.poId  // Get from URL parameter
-    const { poId: userPoNumber, piReceivedDate } = req.body  // poId from form is actually the PO number
+    const databasePoId = req.params.poId
+    const { poId: userPoNumber, piReceivedDate } = req.body
     const file = req.file
 
     console.log('DATABASE PO ID:', databasePoId)
@@ -142,13 +142,14 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
     // ---- Fetch existing PO to get the directory path ----
     const { data: poData, error: fetchError } = await supabase
       .from('purchase_orders')
-      .select('po_file_url, buyer_name')
-      .eq('id', databasePoId)  // Use database ID from URL
+      .select('po_file_url, buyer_name, created_by')  // ✅ Add created_by
+      .eq('id', databasePoId)
       .single()
 
     if (fetchError || !poData) {
       return res.status(404).json({ error: 'Purchase Order not found' })
     }    
+    
     const urlParts = poData.po_file_url.split('/')
     const bucketIndex = urlParts.indexOf(BUCKET_NAME)
     
@@ -157,7 +158,7 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
     }
 
     // Extract path segments after bucket name until the filename
-    const pathSegments = urlParts.slice(bucketIndex + 1, -1) // Exclude filename
+    const pathSegments = urlParts.slice(bucketIndex + 1, -1)
     const directoryPath = pathSegments.join('/')
 
     // ---- Upload PI file to the same directory ----
@@ -193,20 +194,46 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
       .update({
         pi_received_date: dbFormattedDate,
         pi_file_url: piFileUrl,
-        po_number: userPoNumber,  // Use the user-entered PO number
+        po_number: userPoNumber,
         pi_confirmed: true
       })
-      .eq('id', databasePoId)  // Use database ID from URL
+      .eq('id', databasePoId)
       .select()
 
     if (updateError) throw updateError
+
+    // ---- ✅ CREATE ALERTS FOR PI UPLOAD ----
+    const shopifyAdminCustomers = await getShopifyAdminCustomers()
+
+    if (shopifyAdminCustomers.length > 0) {
+      const alertMessage = `PI uploaded for ${poData.buyer_name} (PO#${userPoNumber}) by ${poData.created_by} on ${dbFormattedDate}`
+      
+      const alertInserts = shopifyAdminCustomers.map(customer => ({
+        message: alertMessage,
+        po_id: databasePoId,  // Link to the same PO
+        recipient_user_id: customer.id.toString(),
+        recipient_name: customer.name || `${customer.first_name} ${customer.last_name}`,
+        is_read: false
+      }))
+
+      const { error: alertError } = await supabase
+        .from('alerts')
+        .insert(alertInserts)
+
+      if (alertError) {
+        console.error('Error creating PI alerts:', alertError)
+      } else {
+        console.log(`✅ Created ${alertInserts.length} PI alerts for admins`)
+      }
+    }
 
     // ---- Success ----
     return res.json({
       success: true,
       poId: databasePoId,
-      message: 'PI uploaded and PO updated successfully',
-      piFileUrl: piFileUrl
+      message: 'PI uploaded, PO updated, and alerts created',
+      piFileUrl: piFileUrl,
+      alertsSent: shopifyAdminCustomers.length  // ✅ Add this
     })
 
   } catch (err) {
@@ -302,6 +329,10 @@ router.get('/alerts', async (req, res) => {
           po_file_url,
           quantity_ordered,
           amount,
+          pi_received_date,
+          pi_file_url,
+          po_number,
+          pi_confirmed,
           created_by
         )
       `)
