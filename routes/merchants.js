@@ -8,7 +8,7 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
   const BUCKET_NAME = 'POFY26' // Updated bucket name
 
   try {
-    const { buyerName, poReceivedDate, quantity, value } = req.body
+    const { buyerName, poReceivedDate, quantity, value, poId } = req.body
     const { createdBy } = req.query
     const file = req.file
 
@@ -16,7 +16,7 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
     console.log('BODY:', req.body)
     console.log('FILE:', req.file)
 
-    if (!buyerName || !poReceivedDate || !file || !createdBy || !quantity || !value) {
+    if (!buyerName || !poReceivedDate || !file || !createdBy || !quantity || !value || !poId) {
       return res.status(400).json({
         error: 'Missing required fields',
       })
@@ -39,7 +39,7 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
     const safeName = file.originalname.replace(/\s+/g, '_')
 
     // ✅ New Path: Buyer Name / Month / Day / po_timestamp_filename
-    filePath = `${safeBuyer}/${monthFolder}/${dayFolder}/po_${Date.now()}_${safeName}`
+    filePath = `${safeBuyer}/${monthFolder}/${dayFolder}/${poId}/po_${Date.now()}_${safeName}`
 
     const { error: uploadError } = await supabase.storage
       .from(BUCKET_NAME)
@@ -65,7 +65,8 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
         created_by: createdBy,
         po_file_url: poFileUrl,
         quantity_ordered: quantity,
-        amount: value
+        amount: value,
+        po_number: poId
       }])
       .select()
 
@@ -119,36 +120,41 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
 })
 
 
+
 router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
   let filePath = null
   const BUCKET_NAME = 'POFY26'
 
   try {
     const databasePoId = req.params.poId
-    const { poId: userPoNumber, piReceivedDate } = req.body
+    const { poNumber, piReceivedDate } = req.body  // ✅ Changed from 'poId' to 'poNumber'
     const file = req.file
 
     console.log('DATABASE PO ID:', databasePoId)
-    console.log('USER PO NUMBER:', userPoNumber)
+    console.log('PO NUMBER:', poNumber)  // ✅ Updated log
     console.log('BODY:', req.body)
     console.log('FILE:', req.file)
 
-    if (!databasePoId || !userPoNumber || !piReceivedDate || !file) {
+    // ✅ Validation: poNumber is optional (backward compatibility)
+    if (!databasePoId || !piReceivedDate || !file) {
       return res.status(400).json({
-        error: 'Missing required fields: poId, piReceivedDate, or piFile',
+        error: 'Missing required fields: piReceivedDate or piFile',
       })
     }
 
-    // ---- Fetch existing PO to get the directory path ----
+    // ---- Fetch existing PO to get directory path and current po_number ----
     const { data: poData, error: fetchError } = await supabase
       .from('purchase_orders')
-      .select('po_file_url, buyer_name, created_by')  // ✅ Add created_by
+      .select('po_file_url, buyer_name, created_by, po_number')  // ✅ Also select po_number
       .eq('id', databasePoId)
       .single()
 
     if (fetchError || !poData) {
       return res.status(404).json({ error: 'Purchase Order not found' })
-    }    
+    }
+
+    // ✅ Use provided poNumber if available, otherwise keep existing po_number
+    const finalPoNumber = poNumber && poNumber !== 'N/A' ? poNumber : poData.po_number
     
     const urlParts = poData.po_file_url.split('/')
     const bucketIndex = urlParts.indexOf(BUCKET_NAME)
@@ -189,14 +195,21 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
     const dbFormattedDate = `${monthFolder}-${dayFolder}-${year}`
 
     // ---- Update PO record with PI details ----
+    // ✅ Build update object conditionally
+    const updateData = {
+      pi_received_date: dbFormattedDate,
+      pi_file_url: piFileUrl,
+      pi_confirmed: true
+    }
+
+    // ✅ Only update po_number if a new one was provided
+    if (poNumber && poNumber !== 'N/A') {
+      updateData.po_number = poNumber
+    }
+
     const { data: updatedPO, error: updateError } = await supabase
       .from('purchase_orders')
-      .update({
-        pi_received_date: dbFormattedDate,
-        pi_file_url: piFileUrl,
-        po_number: userPoNumber,
-        pi_confirmed: true
-      })
+      .update(updateData)
       .eq('id', databasePoId)
       .select()
 
@@ -206,11 +219,11 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
     const shopifyAdminCustomers = await getShopifyAdminCustomers()
 
     if (shopifyAdminCustomers.length > 0) {
-      const alertMessage = `PI uploaded for ${poData.buyer_name} (PO#${userPoNumber}) by ${poData.created_by} on ${dbFormattedDate}`
+      const alertMessage = `PI uploaded for ${poData.buyer_name} (PO#${finalPoNumber}) by ${poData.created_by} on ${dbFormattedDate}`
       
       const alertInserts = shopifyAdminCustomers.map(customer => ({
         message: alertMessage,
-        po_id: databasePoId,  // Link to the same PO
+        po_id: databasePoId,
         recipient_user_id: customer.id.toString(),
         recipient_name: customer.name || `${customer.first_name} ${customer.last_name}`,
         is_read: false
@@ -233,7 +246,8 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
       poId: databasePoId,
       message: 'PI uploaded, PO updated, and alerts created',
       piFileUrl: piFileUrl,
-      alertsSent: shopifyAdminCustomers.length  // ✅ Add this
+      poNumber: finalPoNumber,  // ✅ Return the PO number used
+      alertsSent: shopifyAdminCustomers.length
     })
 
   } catch (err) {
@@ -247,6 +261,135 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
     res.status(500).json({ error: err.message || 'PI upload failed' })
   }
 })
+
+// router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
+//   let filePath = null
+//   const BUCKET_NAME = 'POFY26'
+
+//   try {
+//     const databasePoId = req.params.poId
+//     const { poId: userPoNumber, piReceivedDate } = req.body
+//     const file = req.file
+
+//     console.log('DATABASE PO ID:', databasePoId)
+//     console.log('USER PO NUMBER:', userPoNumber)
+//     console.log('BODY:', req.body)
+//     console.log('FILE:', req.file)
+
+//     if (!databasePoId || !userPoNumber || !piReceivedDate || !file) {
+//       return res.status(400).json({
+//         error: 'Missing required fields: poId, piReceivedDate, or piFile',
+//       })
+//     }
+
+//     // ---- Fetch existing PO to get the directory path ----
+//     const { data: poData, error: fetchError } = await supabase
+//       .from('purchase_orders')
+//       .select('po_file_url, buyer_name, created_by')  // ✅ Add created_by
+//       .eq('id', databasePoId)
+//       .single()
+
+//     if (fetchError || !poData) {
+//       return res.status(404).json({ error: 'Purchase Order not found' })
+//     }    
+    
+//     const urlParts = poData.po_file_url.split('/')
+//     const bucketIndex = urlParts.indexOf(BUCKET_NAME)
+    
+//     if (bucketIndex === -1) {
+//       throw new Error('Could not parse PO file path from URL')
+//     }
+
+//     // Extract path segments after bucket name until the filename
+//     const pathSegments = urlParts.slice(bucketIndex + 1, -1)
+//     const directoryPath = pathSegments.join('/')
+
+//     // ---- Upload PI file to the same directory ----
+//     const safeName = file.originalname.replace(/\s+/g, '_')
+//     filePath = `${directoryPath}/pi_${Date.now()}_${safeName}`
+
+//     const { error: uploadError } = await supabase.storage
+//       .from(BUCKET_NAME)
+//       .upload(filePath, file.buffer, {
+//         contentType: file.mimetype,
+//         upsert: false,
+//       })
+
+//     if (uploadError) throw uploadError
+
+//     const { data: publicUrlData } = supabase.storage
+//       .from(BUCKET_NAME)
+//       .getPublicUrl(filePath)
+
+//     const piFileUrl = publicUrlData.publicUrl
+
+//     // ---- Format PI received date ----
+//     const dateObj = new Date(piReceivedDate)
+//     const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
+//     const monthFolder = months[dateObj.getMonth()]
+//     const dayFolder = String(dateObj.getDate()).padStart(2, '0')
+//     const year = dateObj.getFullYear()
+//     const dbFormattedDate = `${monthFolder}-${dayFolder}-${year}`
+
+//     // ---- Update PO record with PI details ----
+//     const { data: updatedPO, error: updateError } = await supabase
+//       .from('purchase_orders')
+//       .update({
+//         pi_received_date: dbFormattedDate,
+//         pi_file_url: piFileUrl,
+//         po_number: userPoNumber,
+//         pi_confirmed: true
+//       })
+//       .eq('id', databasePoId)
+//       .select()
+
+//     if (updateError) throw updateError
+
+//     // ---- ✅ CREATE ALERTS FOR PI UPLOAD ----
+//     const shopifyAdminCustomers = await getShopifyAdminCustomers()
+
+//     if (shopifyAdminCustomers.length > 0) {
+//       const alertMessage = `PI uploaded for ${poData.buyer_name} (PO#${userPoNumber}) by ${poData.created_by} on ${dbFormattedDate}`
+      
+//       const alertInserts = shopifyAdminCustomers.map(customer => ({
+//         message: alertMessage,
+//         po_id: databasePoId,  // Link to the same PO
+//         recipient_user_id: customer.id.toString(),
+//         recipient_name: customer.name || `${customer.first_name} ${customer.last_name}`,
+//         is_read: false
+//       }))
+
+//       const { error: alertError } = await supabase
+//         .from('alerts')
+//         .insert(alertInserts)
+
+//       if (alertError) {
+//         console.error('Error creating PI alerts:', alertError)
+//       } else {
+//         console.log(`✅ Created ${alertInserts.length} PI alerts for admins`)
+//       }
+//     }
+
+//     // ---- Success ----
+//     return res.json({
+//       success: true,
+//       poId: databasePoId,
+//       message: 'PI uploaded, PO updated, and alerts created',
+//       piFileUrl: piFileUrl,
+//       alertsSent: shopifyAdminCustomers.length  // ✅ Add this
+//     })
+
+//   } catch (err) {
+//     console.error('PI Upload Error:', err)
+
+//     // ---- Rollback file if DB update failed ----
+//     if (filePath) {
+//       await supabase.storage.from(BUCKET_NAME).remove([filePath])
+//     }
+
+//     res.status(500).json({ error: err.message || 'PI upload failed' })
+//   }
+// })
 
 
 async function getShopifyAdminCustomers() {
