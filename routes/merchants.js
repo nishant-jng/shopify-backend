@@ -50,11 +50,11 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
 
     if (uploadError) throw uploadError
 
-    const { data: publicUrlData } = supabase.storage
-      .from(BUCKET_NAME) // ✅ Changed to POFY26
-      .getPublicUrl(filePath)
+    // const { data: publicUrlData } = supabase.storage
+    //   .from(BUCKET_NAME) // ✅ Changed to POFY26
+    //   .getPublicUrl(filePath)
 
-    const poFileUrl = publicUrlData.publicUrl
+    // const poFileUrl = publicUrlData.publicUrl
 
     // ---- Insert PO into DB ----
     const { data: poRows, error: insertError } = await supabase
@@ -63,7 +63,7 @@ router.post('/upload-po', upload.single('poFile'), async (req, res) => {
         buyer_name: buyerName,
         po_received_date: dbFormattedDate, 
         created_by: createdBy,
-        po_file_url: poFileUrl,
+        po_file_url: filePath,
         quantity_ordered: quantity,
         amount: value,
         po_number: poId
@@ -180,11 +180,11 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
 
     if (uploadError) throw uploadError
 
-    const { data: publicUrlData } = supabase.storage
-      .from(BUCKET_NAME)
-      .getPublicUrl(filePath)
+    // const { data: publicUrlData } = supabase.storage
+    //   .from(BUCKET_NAME)
+    //   .getPublicUrl(filePath)
 
-    const piFileUrl = publicUrlData.publicUrl
+    // const piFileUrl = publicUrlData.publicUrl
 
     // ---- Format PI received date ----
     const dateObj = new Date(piReceivedDate)
@@ -198,7 +198,7 @@ router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
     // ✅ Build update object conditionally
     const updateData = {
       pi_received_date: dbFormattedDate,
-      pi_file_url: piFileUrl,
+      pi_file_url: filePath,
       pi_confirmed: true
     }
 
