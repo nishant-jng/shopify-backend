@@ -469,4 +469,76 @@ router.post('/alerts/mark-all-read', async (req, res) => {
   }
 })
 
+
+// GET /api/buyers/:buyerOrgId/suppliers
+router.get("/buyers/:buyerOrgId/suppliers", async (req, res) => {
+  const { buyerOrgId } = req.params;
+
+  const { data, error } = await supabase
+    .from("buyer_supplier_links")
+    .select(`
+      organizations!buyer_supplier_links_supplier_org_id_fkey (
+        id,
+        display_name
+      )
+    `)
+    .eq("buyer_org_id", buyerOrgId)
+    .eq("relationship_status", "active");
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const suppliers = data.map(
+    (row) => row.organizations
+  );
+
+  res.json(suppliers);
+});
+
+
+
+// GET /api/merchant/:memberId/buyers
+// GET /api/buyers?email=
+router.get("/buyers", async (req, res) => {
+  const { email } = req.query;
+
+  if (!email) {
+    return res.status(400).json({ error: "Missing email" });
+  }
+
+  // 1. Find member by email
+  const { data: member, error: memberError } = await supabase
+    .from("organization_members")
+    .select("id")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (memberError || !member) {
+    return res.status(403).json({ error: "Invalid member" });
+  }
+
+  // 2. Fetch buyers this member can access
+  const { data, error } = await supabase
+    .from("member_organization_access")
+    .select(`
+      organizations (
+        id,
+        display_name,
+        type
+      )
+    `)
+    .eq("member_id", member.id)
+    .eq("organizations.type", "buyer");
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  const buyers = data.map(row => row.organizations);
+
+  res.json(buyers);
+});
+
+
 module.exports = router

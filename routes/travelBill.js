@@ -9,7 +9,7 @@ router.post(
   upload.single('billFile'),
   async (req, res) => {
     let filePath = null
-    const BUCKET_NAME = 'TRAVEL_BILLS'
+    const BUCKET_NAME = 'TRAVEL BILL FY26'
 
     try {
       const { travelDate, comments, email } = req.body
