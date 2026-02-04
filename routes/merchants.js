@@ -458,9 +458,27 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
        REUSE DIRECTORY
     ========================= */
 
-    const parts = poData.po_file_url.split('/')
-    const bucketIndex = parts.indexOf(BUCKET_NAME)
-    const directoryPath = parts.slice(bucketIndex + 1, -1).join('/')
+    /* =========================
+   REUSE DIRECTORY
+========================= */
+
+if (!poData.po_file_url) {
+  throw new Error('PO file URL not found in database')
+}
+
+// po_file_url format: "BuyerName/Month/Day/poId/po_timestamp_filename.pdf"
+// We want the directory: "BuyerName/Month/Day/poId"
+const parts = poData.po_file_url.split('/')
+
+// Remove the last part (filename) to get the directory
+const directoryPath = parts.slice(0, -1).join('/')
+
+console.log('📁 Original PO file URL:', poData.po_file_url)
+console.log('📁 Extracted directory path:', directoryPath)
+
+if (!directoryPath) {
+  throw new Error('Could not extract directory path from PO file URL')
+}
 
     /* =========================
        UPLOAD PI FILE
