@@ -246,6 +246,22 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
 
     if (insertError) throw insertError
 
+    const poSnapshot = {
+  po_id: po.id,
+  po_number: po.po_number,
+  buyer_name: buyerNameText,
+  supplier_name: supplierNameText,
+  po_received_date: po.po_received_date,
+  quantity_ordered: po.quantity_ordered,
+  amount: po.amount,
+  currency: po.currency || 'USD',
+  pi_confirmed: false,          // new PO
+  pi_received_date: null,
+  po_file_url: po.po_file_url,
+  pi_file_url: null
+}
+
+
     const po = poRows[0]
 
     /* =========================
@@ -318,6 +334,7 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       const alertInserts = eligibleMembers.map(member => ({
         message: alertMessage,
         po_id: po.id,
+        po_snapshot: poSnapshot,
         recipient_user_id: member.id,   // organization_members.id
         recipient_name: member.full_name,
         is_read: false
@@ -388,133 +405,98 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
     const { createdBy } = req.query
     const file = req.file
 
-    /* =========================
-       BASIC VALIDATION
-    ========================= */
-
     if (!databasePoId || !piReceivedDate || !file) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-      })
+      return res.status(400).json({ error: 'Missing required fields' })
     }
 
     /* =========================
-       FETCH PO + LINK
+       FETCH PO
     ========================= */
 
-    const { data: poData, error: fetchError } = await supabase
+    const { data: poData } = await supabase
       .from('purchase_orders')
-      .select(`
-        po_file_url,
-        po_number,
-        buyer_supplier_link_id
-      `)
+      .select('po_file_url, po_number, buyer_supplier_link_id')
       .eq('id', databasePoId)
       .maybeSingle()
 
-    if (fetchError || !poData) {
+    if (!poData) {
       return res.status(404).json({ error: 'Purchase Order not found' })
     }
-
-    const buyerSupplierLinkId = poData.buyer_supplier_link_id
 
     /* =========================
        RESOLVE BUYER + SUPPLIER
     ========================= */
 
-    const { data: orgNames } = await supabase
+    const { data: link } = await supabase
       .from('buyer_supplier_links')
       .select(`
         buyer_org_id,
-        buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
-          display_name
-        ),
-        supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
-          display_name
-        )
+        buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (display_name),
+        supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (display_name)
       `)
-      .eq('id', buyerSupplierLinkId)
+      .eq('id', poData.buyer_supplier_link_id)
       .maybeSingle()
 
-    if (!orgNames) {
-      throw new Error('Buyer–Supplier link not found')
-    }
+    if (!link) throw new Error('Buyer–Supplier link not found')
 
-    const buyerOrgId = orgNames.buyer_org_id
-    const buyerNameText = orgNames.buyer.display_name
-    const supplierNameText = orgNames.supplier.display_name
+    const buyerOrgId = link.buyer_org_id
+    const buyerNameText = link.buyer.display_name
+    const supplierNameText = link.supplier.display_name
 
     /* =========================
-       PARSE EXISTING PATH
+       REUSE DIRECTORY
     ========================= */
 
-    const pathParts = poData.po_file_url.split('/')
-    const bucketIndex = pathParts.indexOf(BUCKET_NAME)
-
-    if (bucketIndex === -1) {
-      throw new Error('Could not parse PO storage path')
-    }
-
-    const directoryPath = pathParts.slice(bucketIndex + 1, -1).join('/')
+    const parts = poData.po_file_url.split('/')
+    const bucketIndex = parts.indexOf(BUCKET_NAME)
+    const directoryPath = parts.slice(bucketIndex + 1, -1).join('/')
 
     /* =========================
        UPLOAD PI FILE
     ========================= */
 
-    const safeFileName = file.originalname.replace(/\s+/g, '_')
-    filePath = `${directoryPath}/pi_${Date.now()}_${safeFileName}`
+    const safeName = file.originalname.replace(/\s+/g, '_')
+    filePath = `${directoryPath}/pi_${Date.now()}_${safeName}`
 
-    const { error: uploadError } = await supabase.storage
+    await supabase.storage
       .from(BUCKET_NAME)
       .upload(filePath, file.buffer, {
         contentType: file.mimetype,
         upsert: false,
       })
 
-    if (uploadError) throw uploadError
-
     /* =========================
        FORMAT DATE
     ========================= */
 
-    const dateObj = new Date(piReceivedDate)
+    const d = new Date(piReceivedDate)
     const months = [
       'January','February','March','April','May','June',
       'July','August','September','October','November','December'
     ]
-
     const dbFormattedDate =
-      `${months[dateObj.getMonth()]}-${String(dateObj.getDate()).padStart(2,'0')}-${dateObj.getFullYear()}`
+      `${months[d.getMonth()]}-${String(d.getDate()).padStart(2,'0')}-${d.getFullYear()}`
 
     /* =========================
-       UPDATE PO WITH PI DATA
+       UPDATE PO
     ========================= */
 
-    const updateData = {
-      pi_received_date: dbFormattedDate,
-      pi_file_url: filePath,
-      pi_confirmed: true
-    }
-
-    if (poNumber && poNumber !== 'N/A') {
-      updateData.po_number = poNumber
-    }
-
-    const { error: updateError } = await supabase
+    await supabase
       .from('purchase_orders')
-      .update(updateData)
+      .update({
+        pi_received_date: dbFormattedDate,
+        pi_file_url: filePath,
+        pi_confirmed: true,
+        ...(poNumber && poNumber !== 'N/A' ? { po_number: poNumber } : {})
+      })
       .eq('id', databasePoId)
 
-    if (updateError) throw updateError
-
-    const finalPoNumber =
-      poNumber && poNumber !== 'N/A'
-        ? poNumber
-        : poData.po_number
+    const finalPoNumber = poNumber && poNumber !== 'N/A'
+      ? poNumber
+      : poData.po_number
 
     /* =========================
        FETCH MERCHANT MEMBERS
-       WITH ACCESS TO BUYER
     ========================= */
 
     const { data: merchantOrg } = await supabase
@@ -523,11 +505,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       .eq('type', 'merchant')
       .maybeSingle()
 
-    if (!merchantOrg) {
-      throw new Error('Merchant organization not found')
-    }
-
-    const { data: accessRows, error: accessError } = await supabase
+    const { data: accessRows } = await supabase
       .from('member_organization_access')
       .select(`
         organization_members (
@@ -539,55 +517,42 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       `)
       .eq('organization_id', buyerOrgId)
 
-    if (accessError) throw accessError
-
-    // const eligibleMembers = accessRows
-    //   .map(r => r.organization_members)
-    //   .filter(
-    //     m =>
-    //       m.organization_id === merchantOrg.id &&
-    //       m.email !== createdBy   // ✅ exclude uploader
-    //   )
+    const eligibleMembers = accessRows
+      .map(r => r.organization_members)
+      .filter(m => m.organization_id === merchantOrg.id)
 
     /* =========================
-       CREATE ALERTS
+       CREATE ALERTS + SNAPSHOT
     ========================= */
+
+    const poSnapshot = {
+      po_id: databasePoId,
+      po_number: finalPoNumber,
+      buyer_name: buyerNameText,
+      supplier_name: supplierNameText,
+      po_received_date: null,
+      quantity_ordered: null,
+      amount: null,
+      pi_confirmed: true,
+      pi_received_date: dbFormattedDate,
+      po_file_url: poData.po_file_url,
+      pi_file_url: filePath
+    }
 
     if (eligibleMembers.length > 0) {
       const alertMessage =
-        `PI uploaded for ${buyerNameText} → ${supplierNameText} ` +
-        `(PO#${finalPoNumber}) by ${createdBy} on ${dbFormattedDate}`
+        `PI uploaded for ${buyerNameText} → ${supplierNameText} (PO#${finalPoNumber})`
 
-      const alertInserts = accessRows.map(member => ({
+      const alerts = eligibleMembers.map(m => ({
         message: alertMessage,
         po_id: databasePoId,
-        recipient_user_id: member.id,
-        recipient_name: member.full_name,
+        po_snapshot: poSnapshot,
+        recipient_user_id: m.id,
+        recipient_name: m.full_name,
         is_read: false
       }))
 
-      const { error: alertError } = await supabase
-        .from('alerts')
-        .insert(alertInserts)
-
-      if (alertError) {
-        console.error('PI alert creation failed:', alertError)
-      }
-
-      // Optional email
-      sendAlertEmail(
-        eligibleMembers.map(m => ({
-          email: m.email,
-          name: m.full_name
-        })),
-        alertMessage,
-        {
-          buyer_name: buyerNameText,
-          supplier_name: supplierNameText,
-          po_number: finalPoNumber,
-          date: dbFormattedDate
-        }
-      ).catch(err => console.error('Email failed:', err))
+      await supabase.from('alerts').insert(alerts)
     }
 
     /* =========================
@@ -856,7 +821,7 @@ router.get('/alerts', async (req, res) => {
       `)
       .eq('recipient_user_id', userId)
       .order('created_at', { ascending: false })
-      .limit(50)
+      .limit(100)
 
     if (error) throw error
 
@@ -923,7 +888,7 @@ router.get('/my-alerts', async (req, res) => {
       `)
       .in('recipient_user_id', recipientIds)
       .order('created_at', { ascending: false })
-      .limit(50)
+      .limit(100)
 
     if (error) throw error
 
@@ -979,69 +944,59 @@ router.get('/my-pos', async (req, res) => {
 router.get('/my-buyer-pos', async (req, res) => {
   try {
     const { shopifyCustomerId } = req.query
-
     if (!shopifyCustomerId) {
-      return res.status(400).json({
-        error: 'shopifyCustomerId required'
-      })
+      return res.status(400).json({ error: 'shopifyCustomerId required' })
     }
 
     /* =========================
-       RESOLVE MEMBER
+       RESOLVE MEMBER + ACCESS
     ========================= */
 
-    const { data: member } = await supabase
+    const { data: member, error: memberError } = await supabase
       .from('organization_members')
-      .select('id')
+      .select(`
+        id,
+        member_organization_access ( organization_id )
+      `)
       .eq('shopify_customer_id', shopifyCustomerId)
       .maybeSingle()
 
-    if (!member) {
+    if (memberError) throw memberError
+
+    if (!member || !member.member_organization_access?.length) {
       return res.json({ success: true, pos: [], count: 0 })
     }
 
-    const memberId = member.id
+    const buyerOrgIds = member.member_organization_access.map(
+      a => a.organization_id
+    )
 
     /* =========================
-       FETCH BUYER ORGS MEMBER HAS ACCESS TO
+       FETCH BUYER ORG NAMES
+       (needed for legacy POs)
     ========================= */
 
-    const { data: accessRows, error: accessError } = await supabase
-      .from('member_organization_access')
-      .select('organization_id')
-      .eq('member_id', memberId)
+    const { data: buyerOrgs } = await supabase
+      .from('organizations')
+      .select('id, display_name')
+      .in('id', buyerOrgIds)
 
-    if (accessError) throw accessError
-    if (!accessRows?.length) {
-      return res.json({ success: true, pos: [], count: 0 })
-    }
+    const buyerNameMap = new Map(
+      buyerOrgs.map(o => [o.id, o.display_name])
+    )
 
-    const buyerOrgIds = accessRows.map(r => r.organization_id)
+    const buyerNames = buyerOrgs.map(o => o.display_name)
 
     /* =========================
-       FETCH POS (OLD + NEW)
+       NEW POs (RELATIONSHIP BASED)
     ========================= */
 
-    const { data: rawPos, error: poError } = await supabase
+    const { data: newPOs, error: newPoError } = await supabase
       .from('purchase_orders')
       .select(`
-        id,
-        po_number,
-        po_received_date,
-        po_file_url,
-        quantity_ordered,
-        amount,
-        currency,
-        pi_received_date,
-        pi_file_url,
-        pi_confirmed,
-        created_by,
-        created_at,
-        buyer_name,         -- legacy
-        vendor_name,        -- legacy (if exists)
-        buyer_supplier_links (
+        *,
+        buyer_supplier_links!inner (
           buyer_org_id,
-          supplier_org_id,
           buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
             display_name
           ),
@@ -1050,51 +1005,63 @@ router.get('/my-buyer-pos', async (req, res) => {
           )
         )
       `)
-      .or(
-        `
-        buyer_supplier_links.buyer_org_id.in.(${buyerOrgIds.join(',')}),
-        buyer_name.not.is.null
-        `
-      )
+      .in('buyer_supplier_links.buyer_org_id', buyerOrgIds)
       .order('created_at', { ascending: false })
 
-    if (poError) throw poError
+    if (newPoError) throw newPoError
+
+    /* =========================
+       LEGACY POs (STRING BASED)
+    ========================= */
+
+    const { data: legacyPOs, error: legacyError } = await supabase
+      .from('purchase_orders')
+      .select('*')
+      .is('buyer_supplier_link_id', null)
+      .in('buyer_name', buyerNames)
+      .order('created_at', { ascending: false })
+
+    if (legacyError) throw legacyError
 
     /* =========================
        NORMALIZE RESPONSE
     ========================= */
 
-    const pos = rawPos.map(po => {
-      const buyerName =
-        po.buyer_supplier_links?.buyer?.display_name ||
-        po.buyer_name ||
-        'Unknown Buyer'
+    const normalizedNew = newPOs.map(po => ({
+      ...po,
+      buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
+      supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
+      _source: 'relational'
+    }))
 
-      const supplierName =
-        po.buyer_supplier_links?.supplier?.display_name ||
-        po.vendor_name ||
-        'Unknown Supplier'
+    const normalizedLegacy = legacyPOs.map(po => ({
+      ...po,
+      buyer_name: po.buyer_name,
+      supplier_name: null,
+      _source: 'legacy'
+    }))
 
-      return {
-        ...po,
-        buyer_name: buyerName,
-        supplier_name: supplierName
-      }
-    })
+    const allPOs = [...normalizedNew, ...normalizedLegacy]
+      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+
+    /* =========================
+       RESPONSE
+    ========================= */
 
     return res.json({
       success: true,
-      pos,
-      count: pos.length
+      pos: allPOs,
+      count: allPOs.length
     })
 
   } catch (err) {
-    console.error('Fetch POs Error:', err)
+    console.error('❌ Fetch buyer POs failed:', err)
     res.status(500).json({
-      error: err.message || 'Failed to fetch POs'
+      error: err.message || 'Server Error'
     })
   }
 })
+
 
 
 
