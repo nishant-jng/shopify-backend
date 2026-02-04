@@ -996,13 +996,8 @@ router.get('/my-buyer-pos', async (req, res) => {
       .eq('shopify_customer_id', shopifyCustomerId)
       .maybeSingle()
 
-    // If user not mapped yet, they see nothing
     if (!member) {
-      return res.json({
-        success: true,
-        pos: [],
-        count: 0
-      })
+      return res.json({ success: true, pos: [], count: 0 })
     }
 
     const memberId = member.id
@@ -1017,22 +1012,17 @@ router.get('/my-buyer-pos', async (req, res) => {
       .eq('member_id', memberId)
 
     if (accessError) throw accessError
-
-    if (!accessRows || accessRows.length === 0) {
-      return res.json({
-        success: true,
-        pos: [],
-        count: 0
-      })
+    if (!accessRows?.length) {
+      return res.json({ success: true, pos: [], count: 0 })
     }
 
     const buyerOrgIds = accessRows.map(r => r.organization_id)
 
     /* =========================
-       FETCH POS FOR THOSE BUYERS
+       FETCH POS (OLD + NEW)
     ========================= */
 
-    const { data: pos, error: poError } = await supabase
+    const { data: rawPos, error: poError } = await supabase
       .from('purchase_orders')
       .select(`
         id,
@@ -1047,6 +1037,8 @@ router.get('/my-buyer-pos', async (req, res) => {
         pi_confirmed,
         created_by,
         created_at,
+        buyer_name,         -- legacy
+        vendor_name,        -- legacy (if exists)
         buyer_supplier_links (
           buyer_org_id,
           supplier_org_id,
@@ -1058,10 +1050,37 @@ router.get('/my-buyer-pos', async (req, res) => {
           )
         )
       `)
-      .in('buyer_supplier_links.buyer_org_id', buyerOrgIds)
+      .or(
+        `
+        buyer_supplier_links.buyer_org_id.in.(${buyerOrgIds.join(',')}),
+        buyer_name.not.is.null
+        `
+      )
       .order('created_at', { ascending: false })
 
     if (poError) throw poError
+
+    /* =========================
+       NORMALIZE RESPONSE
+    ========================= */
+
+    const pos = rawPos.map(po => {
+      const buyerName =
+        po.buyer_supplier_links?.buyer?.display_name ||
+        po.buyer_name ||
+        'Unknown Buyer'
+
+      const supplierName =
+        po.buyer_supplier_links?.supplier?.display_name ||
+        po.vendor_name ||
+        'Unknown Supplier'
+
+      return {
+        ...po,
+        buyer_name: buyerName,
+        supplier_name: supplierName
+      }
+    })
 
     return res.json({
       success: true,
@@ -1076,6 +1095,7 @@ router.get('/my-buyer-pos', async (req, res) => {
     })
   }
 })
+
 
 
 
