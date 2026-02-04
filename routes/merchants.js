@@ -159,6 +159,14 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       return res.status(400).json({ error: 'Missing required fields' })
     }
 
+    const quantityNum = Number(quantity)
+    const valueNum = Number(value)
+
+    if (Number.isNaN(quantityNum) || Number.isNaN(valueNum)) {
+      return res.status(400).json({ error: 'Invalid quantity or value' })
+    }
+
+
     /* =========================
        RESOLVE BUYER–SUPPLIER LINK
     ========================= */
@@ -245,6 +253,7 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       .select()
 
     if (insertError) throw insertError
+    const po = poRows[0]
 
     const poSnapshot = {
   po_id: po.id,
@@ -262,7 +271,7 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
 }
 
 
-    const po = poRows[0]
+    
 
     /* =========================
        RESOLVE BUYER + SUPPLIER NAMES (FOR ALERT)
