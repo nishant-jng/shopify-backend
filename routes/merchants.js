@@ -413,7 +413,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
   try {
     const databasePoId = req.params.poId
     const { poNumber, piReceivedDate } = req.body
-    const { createdBy } = req.query
+    // const { createdBy } = req.query
     const file = req.file
 
     if (!databasePoId || !piReceivedDate || !file) {
