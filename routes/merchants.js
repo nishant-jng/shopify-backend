@@ -131,8 +131,8 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
 
   try {
     const {
-      buyerName,        // buyer_org_id
-      supplierName,     // supplier_org_id
+      buyerName,      // buyer_org_id
+      supplierName,   // supplier_org_id
       poReceivedDate,
       quantity,
       value,
@@ -255,24 +255,6 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
     if (insertError) throw insertError
     const po = poRows[0]
 
-    const poSnapshot = {
-  po_id: po.id,
-  po_number: po.po_number,
-  buyer_name: buyerNameText,
-  supplier_name: supplierNameText,
-  po_received_date: po.po_received_date,
-  quantity_ordered: po.quantity_ordered,
-  amount: po.amount,
-  currency: po.currency || 'USD',
-  pi_confirmed: false,          // new PO
-  pi_received_date: null,
-  po_file_url: po.po_file_url,
-  pi_file_url: null
-}
-
-
-    
-
     /* =========================
        RESOLVE BUYER + SUPPLIER NAMES (FOR ALERT)
     ========================= */
@@ -294,6 +276,26 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       orgNames?.buyer?.display_name || 'Unknown Buyer'
     const supplierNameText =
       orgNames?.supplier?.display_name || 'Unknown Supplier'
+
+    /* =========================
+       CREATE SNAPSHOT
+       (Moved here so names are defined)
+    ========================= */
+    
+    const poSnapshot = {
+      po_id: po.id,
+      po_number: po.po_number,
+      buyer_name: buyerNameText,    // Now defined!
+      supplier_name: supplierNameText, // Now defined!
+      po_received_date: po.po_received_date,
+      quantity_ordered: po.quantity_ordered,
+      amount: po.amount,
+      currency: po.currency || 'USD',
+      pi_confirmed: false,
+      pi_received_date: null,
+      po_file_url: po.po_file_url,
+      pi_file_url: null
+    }
 
     /* =========================
        FETCH MERCHANT MEMBERS
