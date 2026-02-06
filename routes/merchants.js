@@ -344,11 +344,15 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
 
       const alertInserts = eligibleMembers.map(member => ({
         message: alertMessage,
+        alert_type: 'PO_UPLOAD',
         po_id: po.id,
         po_snapshot: poSnapshot,
         recipient_user_id: member.id,   // organization_members.id
         recipient_name: member.full_name,
-        is_read: false
+        is_read: false,
+        email_sent: false,
+        retry_count: 0,
+        scheduled_for: new Date().toISOString()
       }))
 
       const { error: alertError } = await supabase
@@ -374,7 +378,8 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
           po_number: poId,
           quantity_ordered: quantity,
           amount: value,
-          date: dbFormattedDate
+          date: dbFormattedDate,
+          
         }
       ).catch(err => console.error('Email failed:', err))
     }
