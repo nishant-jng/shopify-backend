@@ -470,6 +470,7 @@ if (!poData.po_file_url) {
 // We want the directory: "BuyerName/Month/Day/poId"
 const parts = poData.po_file_url.split('/')
 
+
 // Remove the last part (filename) to get the directory
 const directoryPath = parts.slice(0, -1).join('/')
 
@@ -574,14 +575,32 @@ if (!directoryPath) {
 
       const alerts = eligibleMembers.map(m => ({
         message: alertMessage,
+        alert_type: 'PI_UPLOAD',
         po_id: databasePoId,
         po_snapshot: poSnapshot,
         recipient_user_id: m.id,
         recipient_name: m.full_name,
-        is_read: false
-      }))
+        is_read: false,
+        email_sent: false,
+        retry_count: 0,
+        scheduled_for: new Date().toISOString()
+      })) 
 
       await supabase.from('alerts').insert(alerts)
+      //       await sendAlertEmail(
+      //   eligibleMembers.map(m => ({
+      //     email: m.email,
+      //     name: m.full_name
+      //   })),
+      //   `PI uploaded for ${buyerNameText} → ${supplierNameText} (PO#${finalPoNumber})`,
+      //   {
+      //     buyer_name: buyerNameText,
+      //     supplier_name: supplierNameText,
+      //     po_number: finalPoNumber,
+      //     date: dbFormattedDate
+      //   }
+      // )
+
     }
 
     /* =========================
