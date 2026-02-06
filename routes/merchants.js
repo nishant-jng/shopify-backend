@@ -413,7 +413,6 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
   try {
     const databasePoId = req.params.poId
     const { poNumber, piReceivedDate } = req.body
-    // const { createdBy } = req.query
     const file = req.file
 
     if (!databasePoId || !piReceivedDate || !file) {
@@ -424,21 +423,28 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
        FETCH PO
     ========================= */
 
-    const { data: poData } = await supabase
+    const { data: poData, error: poError } = await supabase
       .from('purchase_orders')
       .select('po_file_url, po_number, buyer_supplier_link_id')
       .eq('id', databasePoId)
       .maybeSingle()
 
+    if (poError) {
+      console.error('❌ PO fetch error:', poError)
+      throw poError
+    }
+
     if (!poData) {
       return res.status(404).json({ error: 'Purchase Order not found' })
     }
+
+    console.log('✅ PO Data fetched:', poData)
 
     /* =========================
        RESOLVE BUYER + SUPPLIER
     ========================= */
 
-    const { data: link } = await supabase
+    const { data: link, error: linkError } = await supabase
       .from('buyer_supplier_links')
       .select(`
         buyer_org_id,
@@ -448,38 +454,40 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       .eq('id', poData.buyer_supplier_link_id)
       .maybeSingle()
 
+    if (linkError) {
+      console.error('❌ Link fetch error:', linkError)
+      throw linkError
+    }
+
     if (!link) throw new Error('Buyer–Supplier link not found')
 
     const buyerOrgId = link.buyer_org_id
     const buyerNameText = link.buyer.display_name
     const supplierNameText = link.supplier.display_name
 
+    console.log('✅ Buyer-Supplier link:', { buyerOrgId, buyerNameText, supplierNameText })
+
     /* =========================
        REUSE DIRECTORY
     ========================= */
 
-    /* =========================
-   REUSE DIRECTORY
-========================= */
+    if (!poData.po_file_url) {
+      throw new Error('PO file URL not found in database')
+    }
 
-if (!poData.po_file_url) {
-  throw new Error('PO file URL not found in database')
-}
+    // po_file_url format: "BuyerName/Month/Day/poId/po_timestamp_filename.pdf"
+    // We want the directory: "BuyerName/Month/Day/poId"
+    const parts = poData.po_file_url.split('/')
 
-// po_file_url format: "BuyerName/Month/Day/poId/po_timestamp_filename.pdf"
-// We want the directory: "BuyerName/Month/Day/poId"
-const parts = poData.po_file_url.split('/')
+    // Remove the last part (filename) to get the directory
+    const directoryPath = parts.slice(0, -1).join('/')
 
+    console.log('📁 Original PO file URL:', poData.po_file_url)
+    console.log('📁 Extracted directory path:', directoryPath)
 
-// Remove the last part (filename) to get the directory
-const directoryPath = parts.slice(0, -1).join('/')
-
-console.log('📁 Original PO file URL:', poData.po_file_url)
-console.log('📁 Extracted directory path:', directoryPath)
-
-if (!directoryPath) {
-  throw new Error('Could not extract directory path from PO file URL')
-}
+    if (!directoryPath) {
+      throw new Error('Could not extract directory path from PO file URL')
+    }
 
     /* =========================
        UPLOAD PI FILE
@@ -488,12 +496,19 @@ if (!directoryPath) {
     const safeName = file.originalname.replace(/\s+/g, '_')
     filePath = `${directoryPath}/pi_${Date.now()}_${safeName}`
 
-    await supabase.storage
+    const { error: uploadError } = await supabase.storage
       .from(BUCKET_NAME)
       .upload(filePath, file.buffer, {
         contentType: file.mimetype,
         upsert: false,
       })
+
+    if (uploadError) {
+      console.error('❌ File upload error:', uploadError)
+      throw uploadError
+    }
+
+    console.log('✅ PI file uploaded to:', filePath)
 
     /* =========================
        FORMAT DATE
@@ -507,11 +522,13 @@ if (!directoryPath) {
     const dbFormattedDate =
       `${months[d.getMonth()]}-${String(d.getDate()).padStart(2,'0')}-${d.getFullYear()}`
 
+    console.log('📅 Formatted date:', dbFormattedDate)
+
     /* =========================
        UPDATE PO
     ========================= */
 
-    await supabase
+    const { error: updateError } = await supabase
       .from('purchase_orders')
       .update({
         pi_received_date: dbFormattedDate,
@@ -521,6 +538,13 @@ if (!directoryPath) {
       })
       .eq('id', databasePoId)
 
+    if (updateError) {
+      console.error('❌ PO update error:', updateError)
+      throw updateError
+    }
+
+    console.log('✅ PO updated successfully')
+
     const finalPoNumber = poNumber && poNumber !== 'N/A'
       ? poNumber
       : poData.po_number
@@ -529,13 +553,23 @@ if (!directoryPath) {
        FETCH MERCHANT MEMBERS
     ========================= */
 
-    const { data: merchantOrg } = await supabase
+    const { data: merchantOrg, error: merchantError } = await supabase
       .from('organizations')
       .select('id')
       .eq('type', 'merchant')
       .maybeSingle()
 
-    const { data: accessRows } = await supabase
+    if (merchantError) {
+      console.error('❌ Merchant org fetch error:', merchantError)
+    }
+
+    console.log('🏢 Merchant org:', merchantOrg)
+
+    if (!merchantOrg) {
+      console.warn('⚠️ No merchant organization found - skipping alerts')
+    }
+
+    const { data: accessRows, error: accessError } = await supabase
       .from('member_organization_access')
       .select(`
         organization_members (
@@ -547,9 +581,19 @@ if (!directoryPath) {
       `)
       .eq('organization_id', buyerOrgId)
 
-    const eligibleMembers = accessRows
+    if (accessError) {
+      console.error('❌ Member access fetch error:', accessError)
+    }
+
+    console.log('👥 Access rows fetched:', accessRows?.length || 0)
+    console.log('🔍 Buyer Org ID used for query:', buyerOrgId)
+
+    const eligibleMembers = (accessRows || [])
       .map(r => r.organization_members)
-      .filter(m => m.organization_id === merchantOrg.id)
+      .filter(m => m && merchantOrg && m.organization_id === merchantOrg.id)
+
+    console.log('✅ Eligible members after filtering:', eligibleMembers.length)
+    console.log('📋 Eligible members:', eligibleMembers)
 
     /* =========================
        CREATE ALERTS + SNAPSHOT
@@ -584,23 +628,28 @@ if (!directoryPath) {
         email_sent: false,
         retry_count: 0,
         scheduled_for: new Date().toISOString()
-      })) 
+      }))
 
-      await supabase.from('alerts').insert(alerts)
-      //       await sendAlertEmail(
-      //   eligibleMembers.map(m => ({
-      //     email: m.email,
-      //     name: m.full_name
-      //   })),
-      //   `PI uploaded for ${buyerNameText} → ${supplierNameText} (PO#${finalPoNumber})`,
-      //   {
-      //     buyer_name: buyerNameText,
-      //     supplier_name: supplierNameText,
-      //     po_number: finalPoNumber,
-      //     date: dbFormattedDate
-      //   }
-      // )
+      console.log('📨 Alerts to insert:', JSON.stringify(alerts, null, 2))
 
+      const { data: insertedAlerts, error: alertError } = await supabase
+        .from('alerts')
+        .insert(alerts)
+        .select()
+
+      if (alertError) {
+        console.error('❌ Alert insert error:', alertError)
+        console.error('❌ Alert error details:', JSON.stringify(alertError, null, 2))
+      } else {
+        console.log('✅ Alerts created successfully:', insertedAlerts?.length || 0)
+        console.log('✅ Alert IDs:', insertedAlerts?.map(a => a.id))
+      }
+    } else {
+      console.log('⚠️ No eligible members found - alerts not created')
+      console.log('⚠️ Possible reasons:')
+      console.log('   - No merchant organization exists')
+      console.log('   - No member_organization_access records for buyer org')
+      console.log('   - Members do not belong to merchant organization')
     }
 
     /* =========================
@@ -615,9 +664,11 @@ if (!directoryPath) {
     })
 
   } catch (err) {
-    console.error('PI Upload Error:', err)
+    console.error('❌ PI Upload Error:', err)
+    console.error('❌ Error stack:', err.stack)
 
     if (filePath) {
+      console.log('🗑️ Cleaning up uploaded file:', filePath)
       await supabase.storage.from(BUCKET_NAME).remove([filePath])
     }
 
