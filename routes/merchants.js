@@ -166,7 +166,6 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       return res.status(400).json({ error: 'Invalid quantity or value' })
     }
 
-
     /* =========================
        RESOLVE BUYER–SUPPLIER LINK
     ========================= */
@@ -179,13 +178,19 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       .eq('relationship_status', 'active')
       .maybeSingle()
 
-    if (linkError || !link) {
+    if (linkError) {
+      console.error('❌ Link fetch error:', linkError)
+      throw linkError
+    }
+
+    if (!link) {
       return res.status(400).json({
         error: 'Invalid buyer–supplier relationship',
       })
     }
 
     const buyerSupplierLinkId = link.id
+    console.log('✅ Buyer-Supplier link found:', buyerSupplierLinkId)
 
     /* =========================
        DATE HELPERS
@@ -202,16 +207,21 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
     const year = dateObj.getFullYear()
 
     const dbFormattedDate = `${monthFolder}-${dayFolder}-${year}`
+    console.log('📅 Formatted date:', dbFormattedDate)
 
     /* =========================
        RESOLVE BUYER NAME (FOR PATH)
     ========================= */
 
-    const { data: buyerOrg } = await supabase
+    const { data: buyerOrg, error: buyerOrgError } = await supabase
       .from('organizations')
       .select('display_name')
       .eq('id', buyerName)
       .maybeSingle()
+
+    if (buyerOrgError) {
+      console.error('❌ Buyer org fetch error:', buyerOrgError)
+    }
 
     const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer'
     const safeBuyer = buyerDisplayName.replace(/[^a-zA-Z0-9 _-]/g, '').trim()
@@ -233,7 +243,12 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
         upsert: false,
       })
 
-    if (uploadError) throw uploadError
+    if (uploadError) {
+      console.error('❌ File upload error:', uploadError)
+      throw uploadError
+    }
+
+    console.log('✅ PO file uploaded to:', filePath)
 
     /* =========================
        INSERT PURCHASE ORDER
@@ -252,14 +267,19 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       }])
       .select()
 
-    if (insertError) throw insertError
+    if (insertError) {
+      console.error('❌ PO insert error:', insertError)
+      throw insertError
+    }
+
     const po = poRows[0]
+    console.log('✅ PO created with ID:', po.id)
 
     /* =========================
        RESOLVE BUYER + SUPPLIER NAMES (FOR ALERT)
     ========================= */
 
-    const { data: orgNames } = await supabase
+    const { data: orgNames, error: orgNamesError } = await supabase
       .from('buyer_supplier_links')
       .select(`
         buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
@@ -272,21 +292,26 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       .eq('id', buyerSupplierLinkId)
       .maybeSingle()
 
+    if (orgNamesError) {
+      console.error('❌ Org names fetch error:', orgNamesError)
+    }
+
     const buyerNameText =
       orgNames?.buyer?.display_name || 'Unknown Buyer'
     const supplierNameText =
       orgNames?.supplier?.display_name || 'Unknown Supplier'
 
+    console.log('✅ Organizations:', { buyerNameText, supplierNameText })
+
     /* =========================
        CREATE SNAPSHOT
-       (Moved here so names are defined)
     ========================= */
     
     const poSnapshot = {
       po_id: po.id,
       po_number: po.po_number,
-      buyer_name: buyerNameText,    // Now defined!
-      supplier_name: supplierNameText, // Now defined!
+      buyer_name: buyerNameText,
+      supplier_name: supplierNameText,
       po_received_date: po.po_received_date,
       quantity_ordered: po.quantity_ordered,
       amount: po.amount,
@@ -299,21 +324,22 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
 
     /* =========================
        FETCH MERCHANT MEMBERS
-       WHO HAVE ACCESS TO THIS BUYER
     ========================= */
 
-    // 1. Get merchant org
-    const { data: merchantOrg } = await supabase
+    const { data: merchantOrg, error: merchantError } = await supabase
       .from('organizations')
       .select('id')
       .eq('type', 'merchant')
       .maybeSingle()
 
-    if (!merchantOrg) {
-      throw new Error('Merchant organization not found')
+    if (merchantError) {
+      console.error('❌ Merchant org fetch error:', merchantError)
     }
 
-    // 2. Get members with access to buyer org
+    if (!merchantOrg) {
+      console.warn('⚠️ Merchant organization not found')
+    }
+
     const { data: accessRows, error: accessError } = await supabase
       .from('member_organization_access')
       .select(`
@@ -326,15 +352,21 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       `)
       .eq('organization_id', buyerName)
 
-    if (accessError) throw accessError
+    if (accessError) {
+      console.error('❌ Member access fetch error:', accessError)
+      throw accessError
+    }
 
-    // 3. Filter to merchant members only
-    const eligibleMembers = accessRows
+    console.log('👥 Access rows fetched:', accessRows?.length || 0)
+
+    const eligibleMembers = (accessRows || [])
       .map(r => r.organization_members)
-      .filter(m => m.organization_id === merchantOrg.id)
+      .filter(m => m && merchantOrg && m.organization_id === merchantOrg.id)
+
+    console.log('✅ Eligible members:', eligibleMembers.length)
 
     /* =========================
-       CREATE ALERTS (BUYER-SCOPED)
+       CREATE ALERTS
     ========================= */
 
     if (eligibleMembers.length > 0) {
@@ -347,25 +379,31 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
         alert_type: 'PO_UPLOAD',
         po_id: po.id,
         po_snapshot: poSnapshot,
-        recipient_user_id: member.id,   // organization_members.id
+        recipient_user_id: member.id,
         recipient_name: member.full_name,
         is_read: false,
-        email_sent: false,
         retry_count: 0,
-        scheduled_for: new Date().toISOString()
+        scheduled_for: new Date().toISOString(),
+        email_sent: false,
       }))
 
-      const { error: alertError } = await supabase
+      console.log('📨 Alerts to insert:', alertInserts.length)
+
+      const { data: insertedAlerts, error: alertError } = await supabase
         .from('alerts')
         .insert(alertInserts)
+        .select()
 
       if (alertError) {
-        console.error('Alert creation failed:', alertError)
+        console.error('❌ Alert insert error:', alertError)
+        console.error('❌ Alert error details:', JSON.stringify(alertError, null, 2))
       } else {
-        console.log(`✅ Created ${alertInserts.length} buyer-scoped alerts`)
+        console.log('✅ Alerts created successfully:', insertedAlerts?.length || 0)
+        console.log('✅ Alert IDs:', insertedAlerts?.map(a => a.id))
       }
 
-      // Optional email notification
+      // Send email notifications
+      console.log('📧 Sending email notifications...')
       sendAlertEmail(
         eligibleMembers.map(m => ({
           email: m.email,
@@ -379,9 +417,15 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
           quantity_ordered: quantity,
           amount: value,
           date: dbFormattedDate,
-          
-        }
-      ).catch(err => console.error('Email failed:', err))
+        },
+        'PO_UPLOAD'
+      ).then(emailResult => {
+        console.log('📧 Email results:', emailResult)
+      }).catch(err => {
+        console.error('❌ Email sending failed:', err)
+      })
+    } else {
+      console.log('⚠️ No eligible members found - alerts not created')
     }
 
     /* =========================
@@ -395,13 +439,15 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
     })
 
   } catch (err) {
-    console.error('PO Upload Error:', err)
+    console.error('❌ PO Upload Error:', err)
+    console.error('❌ Error stack:', err.stack)
 
     /* =========================
        ROLLBACK FILE IF NEEDED
     ========================= */
 
     if (filePath) {
+      console.log('🗑️ Cleaning up uploaded file:', filePath)
       await supabase.storage.from(BUCKET_NAME).remove([filePath])
     }
 
@@ -480,11 +526,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       throw new Error('PO file URL not found in database')
     }
 
-    // po_file_url format: "BuyerName/Month/Day/poId/po_timestamp_filename.pdf"
-    // We want the directory: "BuyerName/Month/Day/poId"
     const parts = poData.po_file_url.split('/')
-
-    // Remove the last part (filename) to get the directory
     const directoryPath = parts.slice(0, -1).join('/')
 
     console.log('📁 Original PO file URL:', poData.po_file_url)
@@ -649,6 +691,27 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
         console.log('✅ Alerts created successfully:', insertedAlerts?.length || 0)
         console.log('✅ Alert IDs:', insertedAlerts?.map(a => a.id))
       }
+
+      // Send email notifications
+      console.log('📧 Sending email notifications...')
+      sendAlertEmail(
+        eligibleMembers.map(m => ({
+          email: m.email,
+          name: m.full_name
+        })),
+        alertMessage,
+        {
+          buyer_name: buyerNameText,
+          supplier_name: supplierNameText,
+          po_number: finalPoNumber, // ✅ Fixed: Use finalPoNumber instead of poId
+          pi_received_date: dbFormattedDate // ✅ Fixed: Use pi_received_date instead of date
+        },
+        'PI_UPLOAD'
+      ).then(emailResult => {
+        console.log('📧 Email results:', emailResult)
+      }).catch(err => {
+        console.error('❌ Email sending failed:', err)
+      })
     } else {
       console.log('⚠️ No eligible members found - alerts not created')
       console.log('⚠️ Possible reasons:')
@@ -660,7 +723,6 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
     /* =========================
        SUCCESS
     ========================= */
-
     return res.json({
       success: true,
       poId: databasePoId,
@@ -682,10 +744,6 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
     })
   }
 })
-
-
-
-
 
 router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
   let filePath = null
