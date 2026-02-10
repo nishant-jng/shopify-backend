@@ -186,7 +186,15 @@ async function sendAlertEmail(recipients, alertMessage, poDetails, alertType = '
     // Generate email template based on alert type
     const emailTemplate = generateEmailTemplate(alertType, alertMessage, poDetails);
 
-    const tasks = recipients.map((recipient, index) => {
+    const excludedEmails = [
+  "nitin@jnitin.com",
+  "ritika@jnitin.com"
+];
+const filteredRecipients = recipients.filter(
+  recipient => !excludedEmails.includes(recipient.email)
+);
+
+    const tasks = filteredRecipients.map((recipient, index) => {
       const emailPayload = {
         from: 'care@jnitin.com',
         to: recipient.email,
