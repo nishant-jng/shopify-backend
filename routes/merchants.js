@@ -457,7 +457,9 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
   }
 })
 
-router.put('/update-buyer-po/:poId', async (req, res) => {
+router.put('/update-buyer-po/:poId',upload.single('poFile'),async (req, res) => {
+  let filePath = null
+  const BUCKET_NAME = 'POFY26'
   try {
     const { poId } = req.params
     const { updatedBy } = req.query
@@ -470,6 +472,7 @@ router.put('/update-buyer-po/:poId', async (req, res) => {
       value,
       poNumber
     } = req.body
+    const file = req.file
 
     if (!poId || !updatedBy) {
       return res.status(400).json({
@@ -491,7 +494,8 @@ router.put('/update-buyer-po/:poId', async (req, res) => {
         amount,
         po_number,
         buyer_supplier_link_id,
-        buyer_name
+        buyer_name,
+        po_file_url
       `)
       .eq('id', poId)
       .maybeSingle()
@@ -511,6 +515,9 @@ router.put('/update-buyer-po/:poId', async (req, res) => {
       })
     }
 
+    const buyerOrgId = buyerName || existingPO.buyer_org_id;
+
+
     /* =========================
        HANDLE BUYER/SUPPLIER CHANGE
     ========================= */
@@ -522,7 +529,7 @@ router.put('/update-buyer-po/:poId', async (req, res) => {
       const { data: link, error: linkError } = await supabase
         .from('buyer_supplier_links')
         .select('id')
-        .eq('buyer_org_id', buyerName)
+        .eq('buyer_org_id', buyerOrgId)
         .eq('supplier_org_id', supplierName)
         .eq('relationship_status', 'active')
         .maybeSingle()
@@ -584,8 +591,76 @@ router.put('/update-buyer-po/:poId', async (req, res) => {
     }
 
     /* =========================
+   HANDLE FILE REPLACEMENT
+========================= */
+
+if (file) {
+  console.log('📄 Replacing existing PO file');
+
+  /* ---- Resolve buyer name for path (same as create route) ---- */
+
+  const { data: buyerOrg } = await supabase
+    .from('organizations')
+    .select('display_name')
+    .eq('id', buyerName)
+    .maybeSingle();
+
+  const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer';
+  const safeBuyer = buyerDisplayName
+    .replace(/[^a-zA-Z0-9 _-]/g, '')
+    .trim();
+
+  /* ---- Rebuild folder structure exactly like upload route ---- */
+
+  const dateObj = new Date(poReceivedDate || existingPO.po_received_date);
+
+  const months = [
+    'January','February','March','April','May','June',
+    'July','August','September','October','November','December'
+  ];
+
+  const monthFolder = months[dateObj.getMonth()];
+  const dayFolder = String(dateObj.getDate()).padStart(2, '0');
+
+  const safeFileName = file.originalname.replace(/\s+/g, '_');
+
+  const newFilePath =
+    `${safeBuyer}/${monthFolder}/${dayFolder}/${poId}/` +
+    `po_${Date.now()}_${safeFileName}`;
+
+  /* ---- Upload new file ---- */
+
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .upload(newFilePath, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false
+    });
+
+  if (uploadError) throw uploadError;
+
+  console.log('✅ New file uploaded:', newFilePath);
+
+  /* ---- Save new path to DB update ---- */
+
+  updateData.po_file_url = newFilePath;
+
+  /* ---- Delete old file AFTER successful upload ---- */
+
+  if (existingPO.po_file_url) {
+    await supabase.storage
+      .from(BUCKET_NAME)
+      .remove([existingPO.po_file_url]);
+
+    console.log('🗑️ Old file removed:', existingPO.po_file_url);
+  }
+}
+
+/* =========================
        NOTHING TO UPDATE
     ========================= */
+
+
 
     if (Object.keys(updateData).length === 1 && updateData.updated_by) {
       return res.json({
@@ -593,6 +668,7 @@ router.put('/update-buyer-po/:poId', async (req, res) => {
         message: 'Nothing to update'
       })
     }
+
 
     /* =========================
        UPDATE PO
