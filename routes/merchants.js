@@ -457,27 +457,30 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
   }
 })
 
-router.put('/update-buyer-po/:poId',upload.single('poFile'),async (req, res) => {
-  let filePath = null
-  const BUCKET_NAME = 'POFY26'
+router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) => {
+  let newFilePath = null;
+  let oldFilePath = null;
+  const BUCKET_NAME = 'POFY26';
+
   try {
-    const { poId } = req.params
-    const { updatedBy } = req.query
+    const { poId } = req.params;
+    const { updatedBy } = req.query;
 
     const {
-      buyerName,      // This will be buyer_org_id when using new system
-      supplierName,   // This will be supplier_org_id when using new system
+      buyerName,      // buyer_org_id when using new system
+      supplierName,   // supplier_org_id when using new system
       poReceivedDate,
       quantity,
       value,
       poNumber
-    } = req.body
-    const file = req.file
+    } = req.body;
+
+    const file = req.file;
 
     if (!poId || !updatedBy) {
       return res.status(400).json({
         error: 'poId and updatedBy required'
-      })
+      });
     }
 
     /* =========================
@@ -495,14 +498,18 @@ router.put('/update-buyer-po/:poId',upload.single('poFile'),async (req, res) => 
         po_number,
         buyer_supplier_link_id,
         buyer_name,
-        po_file_url
+        po_file_url,
+        buyer_supplier_links (
+          buyer_org_id,
+          supplier_org_id
+        )
       `)
       .eq('id', poId)
-      .maybeSingle()
+      .maybeSingle();
 
-    if (fetchError) throw fetchError
+    if (fetchError) throw fetchError;
     if (!existingPO) {
-      return res.status(404).json({ error: 'Purchase Order not found' })
+      return res.status(404).json({ error: 'Purchase Order not found' });
     }
 
     /* =========================
@@ -512,11 +519,17 @@ router.put('/update-buyer-po/:poId',upload.single('poFile'),async (req, res) => 
     if (existingPO.pi_confirmed) {
       return res.status(400).json({
         error: 'PO cannot be modified after PI confirmation'
-      })
+      });
     }
 
-    const buyerOrgId = buyerName || existingPO.buyer_org_id;
+    /* =========================
+       RESOLVE BUYER ORG ID
+    ========================= */
 
+    // Use provided buyerName, or fall back to existing link or legacy buyer_name
+    const buyerOrgId = buyerName || 
+                       existingPO.buyer_supplier_links?.buyer_org_id || 
+                       existingPO.buyer_name;
 
     /* =========================
        HANDLE BUYER/SUPPLIER CHANGE
@@ -524,7 +537,7 @@ router.put('/update-buyer-po/:poId',upload.single('poFile'),async (req, res) => 
 
     let newLinkId = existingPO.buyer_supplier_link_id;
 
-    // If buyer or supplier changed, resolve the new link
+    // If buyer AND supplier are provided, resolve the new link
     if (buyerName && supplierName) {
       const { data: link, error: linkError } = await supabase
         .from('buyer_supplier_links')
@@ -532,143 +545,168 @@ router.put('/update-buyer-po/:poId',upload.single('poFile'),async (req, res) => 
         .eq('buyer_org_id', buyerOrgId)
         .eq('supplier_org_id', supplierName)
         .eq('relationship_status', 'active')
-        .maybeSingle()
+        .maybeSingle();
 
-      if (linkError) throw linkError
+      if (linkError) throw linkError;
 
       if (!link) {
         return res.status(400).json({
           error: 'Invalid buyer–supplier relationship',
-        })
+        });
       }
 
-      newLinkId = link.id
-      console.log('✅ New buyer-supplier link resolved:', newLinkId)
+      newLinkId = link.id;
+      console.log('✅ New buyer-supplier link resolved:', newLinkId);
     }
 
     /* =========================
-       VALIDATE INPUT
+       BUILD UPDATE DATA
     ========================= */
 
-    const updateData = {}
-    updateData.updated_by_name = updatedBy
+    const updateData = {};
+    updateData.updated_by_name = updatedBy; // ✅ Correct column name
 
-    // Update link if it changed
+    // Update link if it changed (migrating from legacy or changing relationship)
     if (newLinkId && newLinkId !== existingPO.buyer_supplier_link_id) {
-      updateData.buyer_supplier_link_id = newLinkId
+      updateData.buyer_supplier_link_id = newLinkId;
       // Clear old buyer_name when migrating to link system
-      updateData.buyer_name = null
+      updateData.buyer_name = null;
     }
 
     if (quantity !== undefined) {
-      const quantityNum = Number(quantity)
+      const quantityNum = Number(quantity);
       if (Number.isNaN(quantityNum)) {
-        return res.status(400).json({ error: 'Invalid quantity' })
+        return res.status(400).json({ error: 'Invalid quantity' });
       }
-      updateData.quantity_ordered = quantityNum
+      updateData.quantity_ordered = quantityNum;
     }
 
     if (value !== undefined) {
-      const valueNum = Number(value)
+      const valueNum = Number(value);
       if (Number.isNaN(valueNum)) {
-        return res.status(400).json({ error: 'Invalid amount' })
+        return res.status(400).json({ error: 'Invalid amount' });
       }
-      updateData.amount = valueNum
+      updateData.amount = valueNum;
     }
 
     if (poNumber && poNumber !== 'N/A') {
-      updateData.po_number = poNumber
-    }
-
-    if (poReceivedDate) {
-      const dateObj = new Date(poReceivedDate)
-      const months = [
-        'January','February','March','April','May','June',
-        'July','August','September','October','November','December'
-      ]
-      updateData.po_received_date =
-        `${months[dateObj.getMonth()]}-${String(dateObj.getDate()).padStart(2,'0')}-${dateObj.getFullYear()}`
+      updateData.po_number = poNumber;
     }
 
     /* =========================
-   HANDLE FILE REPLACEMENT
-========================= */
+       DATE HELPERS
+    ========================= */
 
-if (file) {
-  console.log('📄 Replacing existing PO file');
+    const months = [
+      'January','February','March','April','May','June',
+      'July','August','September','October','November','December'
+    ];
 
-  /* ---- Resolve buyer name for path (same as create route) ---- */
+    if (poReceivedDate) {
+      const dateObj = new Date(poReceivedDate);
+      updateData.po_received_date =
+        `${months[dateObj.getMonth()]}-${String(dateObj.getDate()).padStart(2,'0')}-${dateObj.getFullYear()}`;
+    }
+
+    /* =========================
+       HANDLE FILE REPLACEMENT
+    ========================= */
+
+    if (file) {
+      console.log('📄 Replacing existing PO file');
+
+      // Resolve buyer name for path
+      const { data: buyerOrg } = await supabase
+        .from('organizations')
+        .select('display_name')
+        .eq('id', buyerOrgId) // ✅ Use resolved buyerOrgId
+        .maybeSingle();
+
+      const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer';
+      const safeBuyer = buyerDisplayName
+        .replace(/[^a-zA-Z0-9 _-]/g, '')
+        .trim();
+
+      // Rebuild folder structure
+      const dateObj = new Date(poReceivedDate || existingPO.po_received_date);
+      const monthFolder = months[dateObj.getMonth()];
+      const dayFolder = String(dateObj.getDate()).padStart(2, '0');
+      const safeFileName = file.originalname.replace(/\s+/g, '_');
+
+        const poNumberForPath = poNumber || existingPO.po_number;
+
+        newFilePath =
+          `${safeBuyer}/${monthFolder}/${dayFolder}/${poNumberForPath}/` +
+          `po_${Date.now()}_${safeFileName}`;
+
+      // Upload new file
+      const { error: uploadError } = await supabase.storage
+        .from(BUCKET_NAME)
+        .upload(newFilePath, file.buffer, {
+          contentType: file.mimetype,
+          upsert: false
+        });
+
+      if (uploadError) throw uploadError;
+
+      console.log('✅ New file uploaded:', newFilePath);
+
+      updateData.po_file_url = newFilePath;
+      oldFilePath = existingPO.po_file_url; // Mark for deletion after success
+    }
+    else if (updateData.po_number && existingPO.po_file_url) {
+  // MOVE EXISTING FILE when PO number changed but no new file uploaded
+  console.log('📦 Moving file to new PO number folder');
 
   const { data: buyerOrg } = await supabase
     .from('organizations')
     .select('display_name')
-    .eq('id', buyerName)
+    .eq('id', buyerOrgId)
     .maybeSingle();
 
   const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer';
-  const safeBuyer = buyerDisplayName
-    .replace(/[^a-zA-Z0-9 _-]/g, '')
-    .trim();
-
-  /* ---- Rebuild folder structure exactly like upload route ---- */
+  const safeBuyer = buyerDisplayName.replace(/[^a-zA-Z0-9 _-]/g, '').trim();
 
   const dateObj = new Date(poReceivedDate || existingPO.po_received_date);
-
-  const months = [
-    'January','February','March','April','May','June',
-    'July','August','September','October','November','December'
-  ];
-
   const monthFolder = months[dateObj.getMonth()];
   const dayFolder = String(dateObj.getDate()).padStart(2, '0');
+  
+  const fileName = existingPO.po_file_url.split('/').pop();
+  const poNumberForPath = updateData.po_number;
 
-  const safeFileName = file.originalname.replace(/\s+/g, '_');
+  newFilePath = `${safeBuyer}/${monthFolder}/${dayFolder}/${poNumberForPath}/${fileName}`;
 
-  const newFilePath =
-    `${safeBuyer}/${monthFolder}/${dayFolder}/${poId}/` +
-    `po_${Date.now()}_${safeFileName}`;
+  // Download old file
+  const { data: oldFile, error: downloadError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .download(existingPO.po_file_url);
 
-  /* ---- Upload new file ---- */
+  if (downloadError) throw downloadError;
 
+  // Upload to new location
   const { error: uploadError } = await supabase.storage
     .from(BUCKET_NAME)
-    .upload(newFilePath, file.buffer, {
-      contentType: file.mimetype,
-      upsert: false
-    });
+    .upload(newFilePath, oldFile, { upsert: false });
 
   if (uploadError) throw uploadError;
 
-  console.log('✅ New file uploaded:', newFilePath);
-
-  /* ---- Save new path to DB update ---- */
+  console.log('✅ File moved to:', newFilePath);
 
   updateData.po_file_url = newFilePath;
-
-  /* ---- Delete old file AFTER successful upload ---- */
-
-  if (existingPO.po_file_url) {
-    await supabase.storage
-      .from(BUCKET_NAME)
-      .remove([existingPO.po_file_url]);
-
-    console.log('🗑️ Old file removed:', existingPO.po_file_url);
-  }
+  oldFilePath = existingPO.po_file_url;
 }
+    
 
-/* =========================
+    /* =========================
        NOTHING TO UPDATE
     ========================= */
 
-
-
-    if (Object.keys(updateData).length === 1 && updateData.updated_by) {
+    if (Object.keys(updateData).length === 1 && updateData.updated_by_name) {
       return res.json({
         success: true,
         message: 'Nothing to update'
-      })
+      });
     }
-
 
     /* =========================
        UPDATE PO
@@ -679,11 +717,24 @@ if (file) {
       .update(updateData)
       .eq('id', poId)
       .select()
-      .maybeSingle()
+      .maybeSingle();
 
-    if (updateError) throw updateError
+    if (updateError) throw updateError;
 
-    console.log('✅ PO updated:', poId)
+    console.log('✅ PO updated:', poId);
+
+    /* =========================
+       DELETE OLD FILE (after successful DB update)
+    ========================= */
+
+    if (oldFilePath) {
+      await supabase.storage
+        .from(BUCKET_NAME)
+        .remove([oldFilePath])
+        .catch(err => console.warn('⚠️ Failed to delete old file:', err));
+
+      console.log('🗑️ Old file removed:', oldFilePath);
+    }
 
     /* =========================
        UPDATE EXISTING ALERTS
@@ -692,22 +743,23 @@ if (file) {
     const { data: existingAlerts } = await supabase
       .from('alerts')
       .select('id, po_snapshot')
-      .eq('po_id', poId)
+      .eq('po_id', poId);
 
     if (existingAlerts && existingAlerts.length > 0) {
       const updatePromises = existingAlerts.map(alert => {
-        const changes = []
+        const changes = [];
+        
         if (updateData.quantity_ordered && updateData.quantity_ordered !== existingPO.quantity_ordered) {
-          changes.push(`Quantity: ${existingPO.quantity_ordered} → ${updateData.quantity_ordered}`)
+          changes.push(`Quantity: ${existingPO.quantity_ordered} → ${updateData.quantity_ordered}`);
         }
         if (updateData.amount && updateData.amount !== existingPO.amount) {
-          changes.push(`Amount: ${existingPO.amount} → ${updateData.amount}`)
+          changes.push(`Amount: ${existingPO.amount} → ${updateData.amount}`);
         }
         if (updateData.po_number && updateData.po_number !== existingPO.po_number) {
-          changes.push(`PO#: ${existingPO.po_number} → ${updateData.po_number}`)
+          changes.push(`PO#: ${existingPO.po_number} → ${updateData.po_number}`);
         }
         if (updateData.po_received_date && updateData.po_received_date !== existingPO.po_received_date) {
-          changes.push(`Date: ${existingPO.po_received_date} → ${updateData.po_received_date}`)
+          changes.push(`Date: ${existingPO.po_received_date} → ${updateData.po_received_date}`);
         }
 
         return supabase
@@ -719,21 +771,22 @@ if (file) {
               ...(updateData.amount && { amount: updateData.amount }),
               ...(updateData.po_number && { po_number: updateData.po_number }),
               ...(updateData.po_received_date && { po_received_date: updateData.po_received_date }),
+              ...(updateData.po_file_url && { po_file_url: updateData.po_file_url }),
               last_updated_at: new Date().toISOString(),
               last_updated_by: updatedBy,
               changes: changes.length > 0 ? changes.join(', ') : undefined
             }
           })
-          .eq('id', alert.id)
-      })
+          .eq('id', alert.id);
+      });
 
-      const results = await Promise.all(updatePromises)
+      const results = await Promise.all(updatePromises);
       
-      const errors = results.filter(r => r.error)
+      const errors = results.filter(r => r.error);
       if (errors.length > 0) {
-        console.error('❌ Alert update errors:', errors)
+        console.error('❌ Alert update errors:', errors);
       } else {
-        console.log('✅ Updated alert snapshots:', existingAlerts.length)
+        console.log('✅ Updated alert snapshots:', existingAlerts.length);
       }
     }
 
@@ -745,15 +798,28 @@ if (file) {
       success: true,
       message: 'PO updated successfully',
       po: updatedPO
-    })
+    });
 
   } catch (err) {
-    console.error('❌ Update PO Error:', err)
+    console.error('❌ Update PO Error:', err);
+
+    /* =========================
+       ROLLBACK NEW FILE IF NEEDED
+    ========================= */
+
+    if (newFilePath) {
+      console.log('🗑️ Rolling back uploaded file:', newFilePath);
+      await supabase.storage
+        .from(BUCKET_NAME)
+        .remove([newFilePath])
+        .catch(rollbackErr => console.error('❌ Rollback failed:', rollbackErr));
+    }
+
     return res.status(500).json({
       error: err.message || 'Failed to update PO'
-    })
+    });
   }
-})
+});
 
 router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) => {
   let filePath = null
