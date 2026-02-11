@@ -551,7 +551,7 @@ router.put('/update-buyer-po/:poId',upload.single('poFile'),async (req, res) => 
     ========================= */
 
     const updateData = {}
-    updateData.updated_by = updatedBy
+    updateData.updated_by_name = updatedBy
 
     // Update link if it changed
     if (newLinkId && newLinkId !== existingPO.buyer_supplier_link_id) {
