@@ -457,6 +457,228 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
   }
 })
 
+router.put('/update-buyer-po/:poId', async (req, res) => {
+  try {
+    const { poId } = req.params
+    const { updatedBy } = req.query
+
+    const {
+      buyerName,      // This will be buyer_org_id when using new system
+      supplierName,   // This will be supplier_org_id when using new system
+      poReceivedDate,
+      quantity,
+      value,
+      poNumber
+    } = req.body
+
+    if (!poId || !updatedBy) {
+      return res.status(400).json({
+        error: 'poId and updatedBy required'
+      })
+    }
+
+    /* =========================
+       FETCH EXISTING PO
+    ========================= */
+
+    const { data: existingPO, error: fetchError } = await supabase
+      .from('purchase_orders')
+      .select(`
+        id,
+        pi_confirmed,
+        po_received_date,
+        quantity_ordered,
+        amount,
+        po_number,
+        buyer_supplier_link_id,
+        buyer_name
+      `)
+      .eq('id', poId)
+      .maybeSingle()
+
+    if (fetchError) throw fetchError
+    if (!existingPO) {
+      return res.status(404).json({ error: 'Purchase Order not found' })
+    }
+
+    /* =========================
+       PREVENT UPDATE AFTER PI
+    ========================= */
+
+    if (existingPO.pi_confirmed) {
+      return res.status(400).json({
+        error: 'PO cannot be modified after PI confirmation'
+      })
+    }
+
+    /* =========================
+       HANDLE BUYER/SUPPLIER CHANGE
+    ========================= */
+
+    let newLinkId = existingPO.buyer_supplier_link_id;
+
+    // If buyer or supplier changed, resolve the new link
+    if (buyerName && supplierName) {
+      const { data: link, error: linkError } = await supabase
+        .from('buyer_supplier_links')
+        .select('id')
+        .eq('buyer_org_id', buyerName)
+        .eq('supplier_org_id', supplierName)
+        .eq('relationship_status', 'active')
+        .maybeSingle()
+
+      if (linkError) throw linkError
+
+      if (!link) {
+        return res.status(400).json({
+          error: 'Invalid buyer–supplier relationship',
+        })
+      }
+
+      newLinkId = link.id
+      console.log('✅ New buyer-supplier link resolved:', newLinkId)
+    }
+
+    /* =========================
+       VALIDATE INPUT
+    ========================= */
+
+    const updateData = {}
+    updateData.updated_by = updatedBy
+
+    // Update link if it changed
+    if (newLinkId && newLinkId !== existingPO.buyer_supplier_link_id) {
+      updateData.buyer_supplier_link_id = newLinkId
+      // Clear old buyer_name when migrating to link system
+      updateData.buyer_name = null
+    }
+
+    if (quantity !== undefined) {
+      const quantityNum = Number(quantity)
+      if (Number.isNaN(quantityNum)) {
+        return res.status(400).json({ error: 'Invalid quantity' })
+      }
+      updateData.quantity_ordered = quantityNum
+    }
+
+    if (value !== undefined) {
+      const valueNum = Number(value)
+      if (Number.isNaN(valueNum)) {
+        return res.status(400).json({ error: 'Invalid amount' })
+      }
+      updateData.amount = valueNum
+    }
+
+    if (poNumber && poNumber !== 'N/A') {
+      updateData.po_number = poNumber
+    }
+
+    if (poReceivedDate) {
+      const dateObj = new Date(poReceivedDate)
+      const months = [
+        'January','February','March','April','May','June',
+        'July','August','September','October','November','December'
+      ]
+      updateData.po_received_date =
+        `${months[dateObj.getMonth()]}-${String(dateObj.getDate()).padStart(2,'0')}-${dateObj.getFullYear()}`
+    }
+
+    /* =========================
+       NOTHING TO UPDATE
+    ========================= */
+
+    if (Object.keys(updateData).length === 1 && updateData.updated_by) {
+      return res.json({
+        success: true,
+        message: 'Nothing to update'
+      })
+    }
+
+    /* =========================
+       UPDATE PO
+    ========================= */
+
+    const { data: updatedPO, error: updateError } = await supabase
+      .from('purchase_orders')
+      .update(updateData)
+      .eq('id', poId)
+      .select()
+      .maybeSingle()
+
+    if (updateError) throw updateError
+
+    console.log('✅ PO updated:', poId)
+
+    /* =========================
+       UPDATE EXISTING ALERTS
+    ========================= */
+
+    const { data: existingAlerts } = await supabase
+      .from('alerts')
+      .select('id, po_snapshot')
+      .eq('po_id', poId)
+
+    if (existingAlerts && existingAlerts.length > 0) {
+      const updatePromises = existingAlerts.map(alert => {
+        const changes = []
+        if (updateData.quantity_ordered && updateData.quantity_ordered !== existingPO.quantity_ordered) {
+          changes.push(`Quantity: ${existingPO.quantity_ordered} → ${updateData.quantity_ordered}`)
+        }
+        if (updateData.amount && updateData.amount !== existingPO.amount) {
+          changes.push(`Amount: ${existingPO.amount} → ${updateData.amount}`)
+        }
+        if (updateData.po_number && updateData.po_number !== existingPO.po_number) {
+          changes.push(`PO#: ${existingPO.po_number} → ${updateData.po_number}`)
+        }
+        if (updateData.po_received_date && updateData.po_received_date !== existingPO.po_received_date) {
+          changes.push(`Date: ${existingPO.po_received_date} → ${updateData.po_received_date}`)
+        }
+
+        return supabase
+          .from('alerts')
+          .update({
+            po_snapshot: {
+              ...alert.po_snapshot,
+              ...(updateData.quantity_ordered && { quantity_ordered: updateData.quantity_ordered }),
+              ...(updateData.amount && { amount: updateData.amount }),
+              ...(updateData.po_number && { po_number: updateData.po_number }),
+              ...(updateData.po_received_date && { po_received_date: updateData.po_received_date }),
+              last_updated_at: new Date().toISOString(),
+              last_updated_by: updatedBy,
+              changes: changes.length > 0 ? changes.join(', ') : undefined
+            }
+          })
+          .eq('id', alert.id)
+      })
+
+      const results = await Promise.all(updatePromises)
+      
+      const errors = results.filter(r => r.error)
+      if (errors.length > 0) {
+        console.error('❌ Alert update errors:', errors)
+      } else {
+        console.log('✅ Updated alert snapshots:', existingAlerts.length)
+      }
+    }
+
+    /* =========================
+       SUCCESS
+    ========================= */
+
+    return res.json({
+      success: true,
+      message: 'PO updated successfully',
+      po: updatedPO
+    })
+
+  } catch (err) {
+    console.error('❌ Update PO Error:', err)
+    return res.status(500).json({
+      error: err.message || 'Failed to update PO'
+    })
+  }
+})
+
 router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) => {
   let filePath = null
   const BUCKET_NAME = 'POFY26'
@@ -1407,6 +1629,186 @@ router.get("/buyers", async (req, res) => {
 
   res.json(buyers);
 });
+
+
+
+router.post('/delete-po/:poId', async (req, res) => {
+  try {
+    const { poId } = req.params
+    const { deletedBy } = req.query
+
+    if (!poId || !deletedBy) {
+      return res.status(400).json({
+        error: 'poId and deletedBy required'
+      })
+    }
+
+    /* =========================
+       FETCH PO + LINK DATA
+    ========================= */
+
+    const { data: po, error: poError } = await supabase
+      .from('purchase_orders')
+      .select(`
+        id,
+        po_number,
+        po_received_date,
+        quantity_ordered,
+        amount,
+        po_file_url,
+        pi_file_url,
+        buyer_supplier_links (
+          buyer_org_id,
+          buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
+            display_name
+          ),
+          supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
+            display_name
+          )
+        )
+      `)
+      .eq('id', poId)
+      .is('deleted_at', null)
+      .maybeSingle()
+
+    if (poError) throw poError
+    if (!po) {
+      return res.status(404).json({ error: 'PO not found' })
+    }
+
+    const buyerName =
+      po.buyer_supplier_links?.buyer?.display_name || 'Unknown Buyer'
+
+    const supplierName =
+      po.buyer_supplier_links?.supplier?.display_name || 'Unknown Supplier'
+
+    /* =========================
+       SOFT DELETE PO
+    ========================= */
+
+    const { error: deleteError } = await supabase
+      .from('purchase_orders')
+      .update({
+        deleted_at: new Date().toISOString(),
+        deleted_by_name: deletedBy
+      })
+      .eq('id', poId)
+
+    if (deleteError) throw deleteError
+
+    console.log('🗑️ PO soft deleted:', poId)
+
+    const { data: existingAlerts } = await supabase
+  .from('alerts')
+  .select('id, po_snapshot')
+  .eq('po_id', poId)
+
+// Update each alert with deleted flag
+if (existingAlerts && existingAlerts.length > 0) {
+  // Update alerts one by one to preserve individual snapshots
+  const updatePromises = existingAlerts.map(alert =>
+    supabase
+      .from('alerts')
+      .update({
+        po_snapshot: {
+          ...alert.po_snapshot,
+          deleted: true,
+          deleted_by: deletedBy,
+          deleted_at: new Date().toISOString()
+        }
+      })
+      .eq('id', alert.id)
+  )
+
+  const results = await Promise.all(updatePromises)
+  
+  const errors = results.filter(r => r.error)
+  if (errors.length > 0) {
+    console.error('❌ Alert update errors:', errors)
+  } else {
+    console.log('✅ Updated alerts with deleted flag:', existingAlerts.length)
+  }
+}
+
+    /* =========================
+       FETCH MERCHANT MEMBERS
+    ========================= */
+
+    const { data: merchantOrg } = await supabase
+      .from('organizations')
+      .select('id')
+      .eq('type', 'merchant')
+      .maybeSingle()
+
+    const { data: accessRows } = await supabase
+      .from('member_organization_access')
+      .select(`
+        organization_members (
+          id,
+          full_name,
+          email,
+          organization_id
+        )
+      `)
+      .eq(
+        'organization_id',
+        po.buyer_supplier_links.buyer_org_id
+      )
+
+    const eligibleMembers = (accessRows || [])
+      .map(r => r.organization_members)
+      .filter(m =>
+        m &&
+        merchantOrg &&
+        m.organization_id === merchantOrg.id
+      )
+
+    /* =========================
+       SEND EMAIL ONLY
+    ========================= */
+
+    if (eligibleMembers.length > 0) {
+
+      const message =
+        `PO ${po.po_number} for ${buyerName} → ${supplierName} was deleted by ${deletedBy}`
+
+      sendAlertEmail(
+        eligibleMembers.map(m => ({
+          email: m.email,
+          name: m.full_name
+        })),
+        message,
+        {
+          buyer_name: buyerName,
+          supplier_name: supplierName,
+          po_number: po.po_number,
+          quantity_ordered: po.quantity_ordered,
+          amount: po.amount,
+          date: po.po_received_date
+        },
+        'PO_DELETED'
+      ).catch(err =>
+        console.error('Delete email failed:', err)
+      )
+    }
+
+    /* =========================
+       SUCCESS
+    ========================= */
+
+    return res.json({
+      success: true,
+      message: 'PO deleted successfully'
+    })
+
+  } catch (err) {
+    console.error('❌ Delete PO Error:', err)
+
+    return res.status(500).json({
+      error: err.message || 'Failed to delete PO'
+    })
+  }
+})
 
 
 module.exports = router
