@@ -654,7 +654,7 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
       updateData.po_file_url = newFilePath;
       oldFilePath = existingPO.po_file_url; // Mark for deletion after success
     }
-    else if (updateData.po_number && existingPO.po_file_url) {
+    else if (updateData.po_number && updateData.po_number !== existingPO.po_number && existingPO.po_file_url) {
   // MOVE EXISTING FILE when PO number changed but no new file uploaded
   console.log('📦 Moving file to new PO number folder');
 
