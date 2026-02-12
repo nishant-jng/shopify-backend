@@ -1391,6 +1391,7 @@ router.get('/my-alerts', async (req, res) => {
 
     /* =========================
        FETCH ALERTS (OLD + NEW)
+       Include BOTH po_snapshot and purchase_orders join
     ========================= */
 
     const { data: alerts, error } = await supabase
@@ -1400,7 +1401,9 @@ router.get('/my-alerts', async (req, res) => {
         message,
         is_read,
         created_at,
+        po_snapshot,
         purchase_orders (
+          id,
           po_received_date,
           po_file_url,
           quantity_ordered,
@@ -1409,7 +1412,15 @@ router.get('/my-alerts', async (req, res) => {
           pi_file_url,
           po_number,
           pi_confirmed,
-          created_by
+          created_by,
+          buyer_supplier_links (
+            buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
+              display_name
+            ),
+            supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
+              display_name
+            )
+          )
         )
       `)
       .in('recipient_user_id', recipientIds)
@@ -1418,9 +1429,66 @@ router.get('/my-alerts', async (req, res) => {
 
     if (error) throw error
 
+    /* =========================
+       HYBRID APPROACH: Merge snapshot + live data
+       Priority: po_snapshot > purchase_orders join
+    ========================= */
+
+    const enrichedAlerts = (alerts || []).map(alert => {
+      // If we have a snapshot, use it as base
+      if (alert.po_snapshot) {
+        // Snapshot exists - it contains the state at time of alert
+        // For deleted/updated POs, this is the source of truth
+        return {
+          ...alert,
+          // Keep snapshot as-is (it has deleted, last_updated_at, etc)
+          po_snapshot: alert.po_snapshot,
+          // Keep joined data for fallback
+          purchase_orders: alert.purchase_orders
+        }
+      } 
+      
+      // No snapshot - create one from live purchase_orders data (backward compatibility)
+      if (alert.purchase_orders) {
+        const po = alert.purchase_orders
+        
+        // Build snapshot from live data
+        const syntheticSnapshot = {
+          po_id: po.id,
+          po_number: po.po_number,
+          buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
+          supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
+          po_received_date: po.po_received_date,
+          quantity_ordered: po.quantity_ordered,
+          amount: po.amount,
+          currency: po.currency || 'USD',
+          pi_confirmed: po.pi_confirmed || false,
+          pi_received_date: po.pi_received_date,
+          po_file_url: po.po_file_url,
+          pi_file_url: po.pi_file_url,
+          // Old alerts don't have these fields
+          deleted: false,
+          deleted_at: null,
+          deleted_by: null,
+          last_updated_at: null,
+          last_updated_by: null,
+          changes: null
+        }
+        
+        return {
+          ...alert,
+          po_snapshot: syntheticSnapshot,
+          purchase_orders: alert.purchase_orders
+        }
+      }
+      
+      // No snapshot, no PO data - return as-is
+      return alert
+    })
+
     return res.json({
       success: true,
-      alerts: alerts || []
+      alerts: enrichedAlerts
     })
 
   } catch (err) {
@@ -1430,7 +1498,6 @@ router.get('/my-alerts', async (req, res) => {
     })
   }
 })
-
 
 router.get('/my-pos', async (req, res) => {
   try {
