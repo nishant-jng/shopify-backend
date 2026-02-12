@@ -593,6 +593,8 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
       updateData.po_number = poNumber;
     }
 
+    console.log('Updated poNumber is :', updateData.po_number);
+
     /* =========================
        DATE HELPERS
     ========================= */
