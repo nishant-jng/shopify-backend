@@ -1470,8 +1470,11 @@ router.get('/my-pos', async (req, res) => {
 router.get('/my-buyer-pos', async (req, res) => {
   try {
     const { shopifyCustomerId } = req.query
+
     if (!shopifyCustomerId) {
-      return res.status(400).json({ error: 'shopifyCustomerId required' })
+      return res.status(400).json({
+        error: 'shopifyCustomerId required'
+      })
     }
 
     /* =========================
@@ -1507,10 +1510,6 @@ router.get('/my-buyer-pos', async (req, res) => {
       .select('id, display_name')
       .in('id', buyerOrgIds)
 
-    const buyerNameMap = new Map(
-      buyerOrgs.map(o => [o.id, o.display_name])
-    )
-
     const buyerNames = buyerOrgs.map(o => o.display_name)
 
     /* =========================
@@ -1531,6 +1530,7 @@ router.get('/my-buyer-pos', async (req, res) => {
           )
         )
       `)
+      .is('deleted_at', null) // ✅ exclude deleted POs
       .in('buyer_supplier_links.buyer_org_id', buyerOrgIds)
       .order('created_at', { ascending: false })
 
@@ -1543,6 +1543,7 @@ router.get('/my-buyer-pos', async (req, res) => {
     const { data: legacyPOs, error: legacyError } = await supabase
       .from('purchase_orders')
       .select('*')
+      .is('deleted_at', null) // ✅ exclude deleted POs
       .is('buyer_supplier_link_id', null)
       .in('buyer_name', buyerNames)
       .order('created_at', { ascending: false })
@@ -1555,8 +1556,10 @@ router.get('/my-buyer-pos', async (req, res) => {
 
     const normalizedNew = newPOs.map(po => ({
       ...po,
-      buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
-      supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
+      buyer_name:
+        po.buyer_supplier_links?.buyer?.display_name || null,
+      supplier_name:
+        po.buyer_supplier_links?.supplier?.display_name || null,
       _source: 'relational'
     }))
 
@@ -1569,10 +1572,6 @@ router.get('/my-buyer-pos', async (req, res) => {
 
     const allPOs = [...normalizedNew, ...normalizedLegacy]
       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-
-    /* =========================
-       RESPONSE
-    ========================= */
 
     return res.json({
       success: true,
@@ -1587,6 +1586,134 @@ router.get('/my-buyer-pos', async (req, res) => {
     })
   }
 })
+
+
+
+
+
+
+
+
+// router.get('/my-buyer-pos', async (req, res) => {
+//   try {
+//     const { shopifyCustomerId } = req.query
+//     if (!shopifyCustomerId) {
+//       return res.status(400).json({ error: 'shopifyCustomerId required' })
+//     }
+
+//     /* =========================
+//        RESOLVE MEMBER + ACCESS
+//     ========================= */
+
+//     const { data: member, error: memberError } = await supabase
+//       .from('organization_members')
+//       .select(`
+//         id,
+//         member_organization_access ( organization_id )
+//       `)
+//       .eq('shopify_customer_id', shopifyCustomerId)
+//       .maybeSingle()
+
+//     if (memberError) throw memberError
+
+//     if (!member || !member.member_organization_access?.length) {
+//       return res.json({ success: true, pos: [], count: 0 })
+//     }
+
+//     const buyerOrgIds = member.member_organization_access.map(
+//       a => a.organization_id
+//     )
+
+//     /* =========================
+//        FETCH BUYER ORG NAMES
+//        (needed for legacy POs)
+//     ========================= */
+
+//     const { data: buyerOrgs } = await supabase
+//       .from('organizations')
+//       .select('id, display_name')
+//       .in('id', buyerOrgIds)
+
+//     const buyerNameMap = new Map(
+//       buyerOrgs.map(o => [o.id, o.display_name])
+//     )
+
+//     const buyerNames = buyerOrgs.map(o => o.display_name)
+
+//     /* =========================
+//        NEW POs (RELATIONSHIP BASED)
+//     ========================= */
+
+//     const { data: newPOs, error: newPoError } = await supabase
+//       .from('purchase_orders')
+//       .select(`
+//         *,
+//         buyer_supplier_links!inner (
+//           buyer_org_id,
+//           buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
+//             display_name
+//           ),
+//           supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
+//             display_name
+//           )
+//         )
+//       `)
+//       .in('buyer_supplier_links.buyer_org_id', buyerOrgIds)
+//       .order('created_at', { ascending: false })
+
+//     if (newPoError) throw newPoError
+
+//     /* =========================
+//        LEGACY POs (STRING BASED)
+//     ========================= */
+
+//     const { data: legacyPOs, error: legacyError } = await supabase
+//       .from('purchase_orders')
+//       .select('*')
+//       .is('buyer_supplier_link_id', null)
+//       .in('buyer_name', buyerNames)
+//       .order('created_at', { ascending: false })
+
+//     if (legacyError) throw legacyError
+
+//     /* =========================
+//        NORMALIZE RESPONSE
+//     ========================= */
+
+//     const normalizedNew = newPOs.map(po => ({
+//       ...po,
+//       buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
+//       supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
+//       _source: 'relational'
+//     }))
+
+//     const normalizedLegacy = legacyPOs.map(po => ({
+//       ...po,
+//       buyer_name: po.buyer_name,
+//       supplier_name: null,
+//       _source: 'legacy'
+//     }))
+
+//     const allPOs = [...normalizedNew, ...normalizedLegacy]
+//       .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
+
+//     /* =========================
+//        RESPONSE
+//     ========================= */
+
+//     return res.json({
+//       success: true,
+//       pos: allPOs,
+//       count: allPOs.length
+//     })
+
+//   } catch (err) {
+//     console.error('❌ Fetch buyer POs failed:', err)
+//     res.status(500).json({
+//       error: err.message || 'Server Error'
+//     })
+//   }
+// })
 
 
 
