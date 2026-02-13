@@ -3,127 +3,6 @@ const router = express.Router()
 const supabase = require('../supabaseClient')
 const upload = require('../upload')
 const { sendAlertEmail } = require('../service/emailService');
-router.post('/upload-po', upload.single('poFile'), async (req, res) => {
-  let filePath = null
-  const BUCKET_NAME = 'POFY26' // Updated bucket name
-
-  try {
-    const { buyerName, poReceivedDate, quantity, value, poId } = req.body
-    const { createdBy } = req.query
-    const file = req.file
-
-    console.log('QUERY:', req.query)
-    console.log('BODY:', req.body)
-    console.log('FILE:', req.file)
-
-    if (!buyerName || !poReceivedDate || !file || !createdBy || !quantity || !value || !poId) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-      })
-    }
-    // ---- Date Helpers ----
-    const dateObj = new Date(poReceivedDate)
-    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-
-    const monthFolder = months[dateObj.getMonth()] // e.g., "January"
-    const dayFolder = String(dateObj.getDate()).padStart(2, '0') // e.g., "15"
-    const year = dateObj.getFullYear()
-
-    // 1. Date format for Database record
-    const dbFormattedDate = `${monthFolder}-${dayFolder}-${year}`
-
-    // ---- Upload file to Supabase Storage (POFY26) ----
-
-    // Sanitize names to prevent path issues
-    const safeBuyer = buyerName.replace(/[^a-zA-Z0-9 _-]/g, '').trim() 
-    const safeName = file.originalname.replace(/\s+/g, '_')
-
-    // ✅ New Path: Buyer Name / Month / Day / po_timestamp_filename
-    filePath = `${safeBuyer}/${monthFolder}/${dayFolder}/${poId}/po_${Date.now()}_${safeName}`
-
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(filePath, file.buffer, {
-        contentType: file.mimetype,
-        upsert: false,
-      })
-
-    if (uploadError) throw uploadError
-    // ---- Insert PO into DB ----
-    const { data: poRows, error: insertError } = await supabase
-      .from('purchase_orders')
-      .insert([{
-        buyer_name: buyerName,
-        po_received_date: dbFormattedDate, 
-        created_by: createdBy,
-        po_file_url: filePath,
-        quantity_ordered: quantity,
-        amount: value,
-        po_number: poId
-      }])
-      .select()
-
-    if (insertError) throw insertError
-
-    const po = poRows[0]
-
-    // ---- Handle Alerts (Shopify Admin) ----
-    const shopifyAdminCustomers = await getShopifyAdminCustomers()
-
-    if (shopifyAdminCustomers.length > 0) {
-      const alertMessage = `PO received for ${buyerName} by ${createdBy} on ${dbFormattedDate}`
-      const alertInserts = shopifyAdminCustomers.map(customer => ({
-        message: alertMessage,
-        po_id: po.id,
-        recipient_user_id: customer.id.toString(),
-        recipient_name: customer.name || `${customer.first_name} ${customer.last_name}`,
-        is_read: false
-      }))
-
-      const { error: alertError } = await supabase
-        .from('alerts')
-        .insert(alertInserts)
-
-      if (alertError) {
-        console.error('Error creating alerts:', alertError)
-      } else {
-        console.log(`✅ Created ${alertInserts.length} alerts for admins`)
-
-        sendAlertEmail(
-      shopifyAdminCustomers,
-      alertMessage,
-      {
-        buyer_name: buyerName,
-        po_number: poId,
-        quantity_ordered: quantity,
-        amount: value,
-        date: dbFormattedDate
-      }
-      ).catch(err => console.error('Email failed:', err));
-      }
-    }
-
-    // ---- Success ----
-    return res.json({
-      success: true,
-      poId: po.id,
-      message: 'PO uploaded and alerts created',
-      alertsSent: shopifyAdminCustomers.length
-    })
-
-  } catch (err) {
-    console.error('PO Upload Error:', err)
-
-    // ---- Rollback file if DB failed ----
-    if (filePath) {
-      // ✅ Ensure rollback deletes from the correct bucket
-      await supabase.storage.from(BUCKET_NAME).remove([filePath])
-    }
-
-    res.status(500).json({ error: err.message || 'Upload failed' })
-  }
-})
-
 
 router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
   let filePath = null
@@ -304,7 +183,11 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
     console.log('✅ Organizations:', { buyerNameText, supplierNameText })
 
     /* =========================
-       CREATE SNAPSHOT
+       CREATE INITIAL SNAPSHOT
+       This is the BASE snapshot that will grow over time:
+       - Upload PI will ADD: pi_confirmed, pi_received_date, pi_file_url
+       - Update PO will ADD: last_updated_at, last_updated_by, changes
+       - Update PO will MODIFY: quantity_ordered, amount, etc.
     ========================= */
     
     const poSnapshot = {
@@ -315,12 +198,13 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
       po_received_date: po.po_received_date,
       quantity_ordered: po.quantity_ordered,
       amount: po.amount,
-      currency: po.currency || 'USD',
-      pi_confirmed: false,
-      pi_received_date: null,
+      pi_confirmed: false,        // ← Will be updated to true by PI upload
+      pi_received_date: null,     // ← Will be set by PI upload
       po_file_url: po.po_file_url,
-      pi_file_url: null
+      pi_file_url: null           // ← Will be set by PI upload
     }
+
+    console.log('📸 PO Snapshot created:', poSnapshot)
 
     /* =========================
        FETCH MERCHANT MEMBERS
@@ -366,7 +250,7 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
     console.log('✅ Eligible members:', eligibleMembers.length)
 
     /* =========================
-       CREATE ALERTS
+       CREATE ALERTS (NO EMAIL)
     ========================= */
 
     if (eligibleMembers.length > 0) {
@@ -499,6 +383,7 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
         buyer_supplier_link_id,
         buyer_name,
         po_file_url,
+        pi_file_url,
         buyer_supplier_links (
           buyer_org_id,
           supplier_org_id
@@ -564,7 +449,7 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
     ========================= */
 
     const updateData = {};
-    updateData.updated_by_name = updatedBy; // ✅ Correct column name
+    updateData.updated_by_name = updatedBy;
 
     // Update link if it changed (migrating from legacy or changing relationship)
     if (newLinkId && newLinkId !== existingPO.buyer_supplier_link_id) {
@@ -589,11 +474,11 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
       updateData.amount = valueNum;
     }
 
-    if (poNumber && poNumber !== 'N/A') {
+    if (poNumber && poNumber !== 'N/A' && poNumber !== null) {
       updateData.po_number = poNumber;
     }
 
-    console.log('Updated poNumber is :', updateData.po_number);
+    console.log('Updated poNumber is:', updateData.po_number);
 
     /* =========================
        DATE HELPERS
@@ -611,17 +496,36 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
     }
 
     /* =========================
-       HANDLE FILE REPLACEMENT
+       DETERMINE IF FILE NEEDS TO BE MOVED
+    ========================= */
+
+    const dateChanged = updateData.po_received_date && 
+                       updateData.po_received_date !== existingPO.po_received_date;
+    const poNumberChanged = updateData.po_number && 
+                           updateData.po_number !== existingPO.po_number;
+    const pathChangingFieldsUpdated = dateChanged || poNumberChanged;
+
+    console.log('🔍 File movement check:', {
+      dateChanged,
+      poNumberChanged,
+      needsMove: pathChangingFieldsUpdated && !file
+    });
+
+    /* =========================
+       HANDLE FILE OPERATIONS
     ========================= */
 
     if (file) {
-      console.log('📄 Replacing existing PO file');
+      // ========================================
+      // SCENARIO 1: NEW FILE UPLOADED
+      // ========================================
+      console.log('📄 New file uploaded - replacing existing PO file');
 
       // Resolve buyer name for path
       const { data: buyerOrg } = await supabase
         .from('organizations')
         .select('display_name')
-        .eq('id', buyerOrgId) // ✅ Use resolved buyerOrgId
+        .eq('id', buyerOrgId)
         .maybeSingle();
 
       const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer';
@@ -629,17 +533,16 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
         .replace(/[^a-zA-Z0-9 _-]/g, '')
         .trim();
 
-      // Rebuild folder structure
+      // Use updated date or existing date
       const dateObj = new Date(poReceivedDate || existingPO.po_received_date);
       const monthFolder = months[dateObj.getMonth()];
       const dayFolder = String(dateObj.getDate()).padStart(2, '0');
       const safeFileName = file.originalname.replace(/\s+/g, '_');
+      const poNumberForPath = poNumber || existingPO.po_number;
 
-        const poNumberForPath = poNumber || existingPO.po_number;
-
-        newFilePath =
-          `${safeBuyer}/${monthFolder}/${dayFolder}/${poNumberForPath}/` +
-          `po_${Date.now()}_${safeFileName}`;
+      newFilePath =
+        `${safeBuyer}/${monthFolder}/${dayFolder}/${poNumberForPath}/` +
+        `po_${Date.now()}_${safeFileName}`;
 
       // Upload new file
       const { error: uploadError } = await supabase.storage
@@ -655,49 +558,126 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
 
       updateData.po_file_url = newFilePath;
       oldFilePath = existingPO.po_file_url; // Mark for deletion after success
+
+    } else if (pathChangingFieldsUpdated && existingPO.po_file_url) {
+      // ========================================
+      // SCENARIO 2: NO NEW FILE, BUT DATE OR PO NUMBER CHANGED
+      // Need to move existing file to new path
+      // ========================================
+      console.log('📦 Moving existing file due to date/PO number change');
+
+      const { data: buyerOrg } = await supabase
+        .from('organizations')
+        .select('display_name')
+        .eq('id', buyerOrgId)
+        .maybeSingle();
+
+      const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer';
+      const safeBuyer = buyerDisplayName.replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+
+      // Use NEW date if provided, otherwise existing
+      const dateObj = new Date(poReceivedDate || existingPO.po_received_date);
+      const monthFolder = months[dateObj.getMonth()];
+      const dayFolder = String(dateObj.getDate()).padStart(2, '0');
+      
+      const extractedOldPath = extractPathFromUrl(existingPO.po_file_url);
+      const fileName = extractedOldPath.split('/').pop();
+      
+      // Use NEW po_number if provided, otherwise existing
+      const poNumberForPath = updateData.po_number || existingPO.po_number;
+
+      newFilePath = `${safeBuyer}/${monthFolder}/${dayFolder}/${poNumberForPath}/${fileName}`;
+
+      console.log('📥 Old file path:', extractedOldPath);
+      console.log('📤 New file path:', newFilePath);
+
+      // Only move if path actually changed
+      if (extractedOldPath !== newFilePath) {
+        // Download old file
+        const { data: oldFile, error: downloadError } = await supabase.storage
+          .from(BUCKET_NAME)
+          .download(extractedOldPath);
+
+        if (downloadError) {
+          console.error('❌ Download error:', downloadError);
+          throw downloadError;
+        }
+
+        // Upload to new location
+        const { error: uploadError } = await supabase.storage
+          .from(BUCKET_NAME)
+          .upload(newFilePath, oldFile, { upsert: false });
+
+        if (uploadError) {
+          console.error('❌ Upload error:', uploadError);
+          throw uploadError;
+        }
+
+        console.log('✅ File moved successfully');
+
+        updateData.po_file_url = newFilePath;
+        oldFilePath = extractedOldPath;
+      } else {
+        console.log('ℹ️ Path unchanged, no file movement needed');
+      }
     }
-    else if (updateData.po_number && updateData.po_number !== existingPO.po_number && existingPO.po_file_url) {
-  // MOVE EXISTING FILE when PO number changed but no new file uploaded
-  console.log('📦 Moving file to new PO number folder');
 
-  const { data: buyerOrg } = await supabase
-    .from('organizations')
-    .select('display_name')
-    .eq('id', buyerOrgId)
-    .maybeSingle();
+    // ========================================
+    // SCENARIO 3: PI FILE ALSO NEEDS TO MOVE (if exists)
+    // ========================================
+    let newPiFilePath = null;
+    let oldPiFilePath = null;
 
-  const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer';
-  const safeBuyer = buyerDisplayName.replace(/[^a-zA-Z0-9 _-]/g, '').trim();
+    if (pathChangingFieldsUpdated && existingPO.pi_file_url) {
+      console.log('📦 Moving PI file due to date/PO number change');
 
-  const dateObj = new Date(poReceivedDate || existingPO.po_received_date);
-  const monthFolder = months[dateObj.getMonth()];
-  const dayFolder = String(dateObj.getDate()).padStart(2, '0');
-  
-  const fileName = existingPO.po_file_url.split('/').pop();
-  const poNumberForPath = updateData.po_number;
+      const { data: buyerOrg } = await supabase
+        .from('organizations')
+        .select('display_name')
+        .eq('id', buyerOrgId)
+        .maybeSingle();
 
-  newFilePath = `${safeBuyer}/${monthFolder}/${dayFolder}/${poNumberForPath}/${fileName}`;
+      const buyerDisplayName = buyerOrg?.display_name || 'UnknownBuyer';
+      const safeBuyer = buyerDisplayName.replace(/[^a-zA-Z0-9 _-]/g, '').trim();
 
-  // Download old file
-  const { data: oldFile, error: downloadError } = await supabase.storage
-    .from(BUCKET_NAME)
-    .download(existingPO.po_file_url);
+      const dateObj = new Date(poReceivedDate || existingPO.po_received_date);
+      const monthFolder = months[dateObj.getMonth()];
+      const dayFolder = String(dateObj.getDate()).padStart(2, '0');
+      
+      const extractedOldPiPath = extractPathFromUrl(existingPO.pi_file_url);
+      const piFileName = extractedOldPiPath.split('/').pop();
+      const poNumberForPath = updateData.po_number || existingPO.po_number;
 
-  if (downloadError) throw downloadError;
+      newPiFilePath = `${safeBuyer}/${monthFolder}/${dayFolder}/${poNumberForPath}/${piFileName}`;
 
-  // Upload to new location
-  const { error: uploadError } = await supabase.storage
-    .from(BUCKET_NAME)
-    .upload(newFilePath, oldFile, { upsert: false });
+      console.log('📥 Old PI path:', extractedOldPiPath);
+      console.log('📤 New PI path:', newPiFilePath);
 
-  if (uploadError) throw uploadError;
+      if (extractedOldPiPath !== newPiFilePath) {
+        const { data: oldPiFile, error: downloadError } = await supabase.storage
+          .from(BUCKET_NAME)
+          .download(extractedOldPiPath);
 
-  console.log('✅ File moved to:', newFilePath);
+        if (downloadError) {
+          console.error('❌ PI download error:', downloadError);
+          throw downloadError;
+        }
 
-  updateData.po_file_url = newFilePath;
-  oldFilePath = existingPO.po_file_url;
-}
-    
+        const { error: uploadError } = await supabase.storage
+          .from(BUCKET_NAME)
+          .upload(newPiFilePath, oldPiFile, { upsert: false });
+
+        if (uploadError) {
+          console.error('❌ PI upload error:', uploadError);
+          throw uploadError;
+        }
+
+        console.log('✅ PI file moved successfully');
+
+        updateData.pi_file_url = newPiFilePath;
+        oldPiFilePath = extractedOldPiPath;
+      }
+    }
 
     /* =========================
        NOTHING TO UPDATE
@@ -726,21 +706,38 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
     console.log('✅ PO updated:', poId);
 
     /* =========================
-       DELETE OLD FILE (after successful DB update)
+       DELETE OLD FILES (after successful DB update)
     ========================= */
 
     if (oldFilePath) {
+      const pathToDelete = extractPathFromUrl(oldFilePath);
+      console.log('🗑️ Attempting to delete old PO file:', pathToDelete);
+      
       await supabase.storage
         .from(BUCKET_NAME)
-        .remove([oldFilePath])
-        .catch(err => console.warn('⚠️ Failed to delete old file:', err));
+        .remove([pathToDelete])
+        .catch(err => console.warn('⚠️ Failed to delete old PO file:', err.message));
 
-      console.log('🗑️ Old file removed:', oldFilePath);
+      console.log('✅ Old PO file removed:', pathToDelete);
+    }
+
+    if (oldPiFilePath) {
+      const pathToDelete = extractPathFromUrl(oldPiFilePath);
+      console.log('🗑️ Attempting to delete old PI file:', pathToDelete);
+      
+      await supabase.storage
+        .from(BUCKET_NAME)
+        .remove([pathToDelete])
+        .catch(err => console.warn('⚠️ Failed to delete old PI file:', err.message));
+
+      console.log('✅ Old PI file removed:', pathToDelete);
     }
 
     /* =========================
-       UPDATE EXISTING ALERTS
+       UPDATE EXISTING ALERTS WITH PROGRESSIVE SNAPSHOT
     ========================= */
+
+    console.log('🔄 Updating existing alert snapshots...');
 
     const { data: existingAlerts } = await supabase
       .from('alerts')
@@ -748,13 +745,34 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
       .eq('po_id', poId);
 
     if (existingAlerts && existingAlerts.length > 0) {
+      console.log('📋 Found alerts to update:', existingAlerts.length);
+
+      // Get updated buyer/supplier names if link changed
+      let buyerNameText = null;
+      let supplierNameText = null;
+
+      if (newLinkId && newLinkId !== existingPO.buyer_supplier_link_id) {
+        const { data: orgNames } = await supabase
+          .from('buyer_supplier_links')
+          .select(`
+            buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (display_name),
+            supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (display_name)
+          `)
+          .eq('id', newLinkId)
+          .maybeSingle();
+
+        buyerNameText = orgNames?.buyer?.display_name;
+        supplierNameText = orgNames?.supplier?.display_name;
+      }
+
       const updatePromises = existingAlerts.map(alert => {
+        // Build changes array
         const changes = [];
         
-        if (updateData.quantity_ordered && updateData.quantity_ordered !== existingPO.quantity_ordered) {
+        if (updateData.quantity_ordered !== undefined && updateData.quantity_ordered !== existingPO.quantity_ordered) {
           changes.push(`Quantity: ${existingPO.quantity_ordered} → ${updateData.quantity_ordered}`);
         }
-        if (updateData.amount && updateData.amount !== existingPO.amount) {
+        if (updateData.amount !== undefined && updateData.amount !== existingPO.amount) {
           changes.push(`Amount: ${existingPO.amount} → ${updateData.amount}`);
         }
         if (updateData.po_number && updateData.po_number !== existingPO.po_number) {
@@ -763,21 +781,44 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
         if (updateData.po_received_date && updateData.po_received_date !== existingPO.po_received_date) {
           changes.push(`Date: ${existingPO.po_received_date} → ${updateData.po_received_date}`);
         }
+        if (buyerNameText) {
+          changes.push(`Buyer: ${alert.po_snapshot?.buyer_name} → ${buyerNameText}`);
+        }
+        if (supplierNameText) {
+          changes.push(`Supplier: ${alert.po_snapshot?.supplier_name} → ${supplierNameText}`);
+        }
+
+        // ✅ PROGRESSIVE UPDATE: Merge into existing snapshot
+        const updatedSnapshot = {
+          ...alert.po_snapshot,  // Keep ALL existing fields (including PI fields if present)
+          // Update PO fields (use explicit checks, not conditional spread)
+          ...(updateData.quantity_ordered !== undefined && { quantity_ordered: updateData.quantity_ordered }),
+          ...(updateData.amount !== undefined && { amount: updateData.amount }),
+          ...(updateData.po_number !== undefined && { po_number: updateData.po_number }),
+          ...(updateData.po_received_date !== undefined && { po_received_date: updateData.po_received_date }),
+          ...(updateData.po_file_url !== undefined && { po_file_url: updateData.po_file_url }),
+          ...(updateData.pi_file_url !== undefined && { pi_file_url: updateData.pi_file_url }), // ✅ Update PI file path if moved
+          // Update buyer/supplier names if link changed
+          ...(buyerNameText && { buyer_name: buyerNameText }),
+          ...(supplierNameText && { supplier_name: supplierNameText }),
+          // Add update metadata
+          last_updated_at: new Date().toISOString(),
+          last_updated_by: updatedBy,
+          ...(changes.length > 0 && { changes: changes.join(', ') })
+        };
+
+        console.log(`   Updating alert ${alert.id}:`, {
+          changes: changes.join(', ') || 'metadata only',
+          has_pi_fields: !!alert.po_snapshot?.pi_confirmed,
+          po_file_updated: !!updateData.po_file_url,
+          pi_file_updated: !!updateData.pi_file_url
+        });
 
         return supabase
           .from('alerts')
           .update({
-            po_snapshot: {
-              ...alert.po_snapshot,
-              ...(updateData.quantity_ordered && { quantity_ordered: updateData.quantity_ordered }),
-              ...(updateData.amount && { amount: updateData.amount }),
-              ...(updateData.po_number && { po_number: updateData.po_number }),
-              ...(updateData.po_received_date && { po_received_date: updateData.po_received_date }),
-              ...(updateData.po_file_url && { po_file_url: updateData.po_file_url }),
-              last_updated_at: new Date().toISOString(),
-              last_updated_by: updatedBy,
-              changes: changes.length > 0 ? changes.join(', ') : undefined
-            }
+            po_snapshot: updatedSnapshot,
+            is_read: false,  // Mark as unread since PO was updated
           })
           .eq('id', alert.id);
       });
@@ -799,21 +840,33 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
     return res.json({
       success: true,
       message: 'PO updated successfully',
-      po: updatedPO
+      po: updatedPO,
+      filesMoved: {
+        poFile: !!oldFilePath,
+        piFile: !!oldPiFilePath
+      }
     });
 
   } catch (err) {
     console.error('❌ Update PO Error:', err);
 
     /* =========================
-       ROLLBACK NEW FILE IF NEEDED
+       ROLLBACK NEW FILES IF NEEDED
     ========================= */
 
     if (newFilePath) {
-      console.log('🗑️ Rolling back uploaded file:', newFilePath);
+      console.log('🗑️ Rolling back uploaded PO file:', newFilePath);
       await supabase.storage
         .from(BUCKET_NAME)
         .remove([newFilePath])
+        .catch(rollbackErr => console.error('❌ Rollback failed:', rollbackErr));
+    }
+
+    if (newPiFilePath) {
+      console.log('🗑️ Rolling back uploaded PI file:', newPiFilePath);
+      await supabase.storage
+        .from(BUCKET_NAME)
+        .remove([newPiFilePath])
         .catch(rollbackErr => console.error('❌ Rollback failed:', rollbackErr));
     }
 
@@ -822,7 +875,31 @@ router.put('/update-buyer-po/:poId', upload.single('poFile'), async (req, res) =
     });
   }
 });
-router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) => {
+
+// ========================================
+// HELPER FUNCTION
+// ========================================
+
+function extractPathFromUrl(fileUrl) {
+  if (!fileUrl) return '';
+  
+  // If it's already a path (no http), return as-is
+  if (!fileUrl.startsWith('http')) return fileUrl;
+  
+  // Extract path from full URL
+  // Example: https://domain.supabase.co/storage/v1/object/public/BUCKET/path/to/file.pdf
+  // Returns: path/to/file.pdf
+  const parts = fileUrl.split('/storage/v1/object/public/');
+  if (parts.length === 2) {
+    const afterBucket = parts[1].split('/').slice(1).join('/');
+    return afterBucket;
+  }
+  
+  return fileUrl;
+}
+
+
+router.post('upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) => {
   let filePath = null
   const BUCKET_NAME = 'POFY26'
 
@@ -981,10 +1058,10 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       po_received_date: poData.po_received_date,
       quantity_ordered: poData.quantity_ordered,
       amount: poData.amount,
-      pi_confirmed: true, // ✅ SET TO TRUE
+      pi_confirmed: true,
       pi_received_date: dbFormattedDate,
       po_file_url: poData.po_file_url,
-      pi_file_url: filePath
+      pi_file_url: filePath,
     }
 
     console.log('📸 Complete PO snapshot created:', completePoSnapshot)
@@ -993,43 +1070,114 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
        FETCH EXISTING PO ALERTS & UPDATE THEM
     ========================= */
 
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    console.log('🔍 STEP: Updating Existing PO Alerts')
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
+    console.log('PO ID to search:', databasePoId)
+
     const { data: existingAlerts, error: fetchAlertsError } = await supabase
       .from('alerts')
-      .select('id, po_snapshot, recipient_user_id, recipient_name')
+      .select('id, alert_type, po_snapshot, recipient_user_id, recipient_name, is_read, created_at')
       .eq('po_id', databasePoId)
-      .eq('alert_type', 'PO_UPLOAD')
+
+    console.log('Query executed for po_id:', databasePoId)
+    console.log('Alerts found:', existingAlerts?.length || 0)
 
     if (fetchAlertsError) {
-      console.error('❌ Error fetching existing alerts:', fetchAlertsError)
-    } else if (existingAlerts && existingAlerts.length > 0) {
-      console.log('📋 Found existing PO alerts to update:', existingAlerts.length)
+      console.error('❌ CRITICAL: Error fetching existing alerts:', fetchAlertsError)
+      console.error('❌ Error details:', JSON.stringify(fetchAlertsError, null, 2))
+    }
 
-      const updatePromises = existingAlerts.map(alert => {
-        // Merge existing snapshot with complete new data
+    if (!existingAlerts || existingAlerts.length === 0) {
+      console.log('⚠️ NO EXISTING ALERTS FOUND FOR THIS PO')
+      console.log('⚠️ This means either:')
+      console.log('   1. No alerts were created when PO was uploaded')
+      console.log('   2. The po_id in alerts table doesn\'t match:', databasePoId)
+      console.log('   3. The alerts were deleted')
+    } else {
+      console.log('📋 Found', existingAlerts.length, 'existing alerts')
+      console.log('📋 Alert details:')
+      existingAlerts.forEach((alert, idx) => {
+        console.log(`   Alert ${idx + 1}:`, {
+          id: alert.id,
+          type: alert.alert_type,
+          created: alert.created_at,
+          current_pi_confirmed: alert.po_snapshot?.pi_confirmed,
+          current_pi_file_url: alert.po_snapshot?.pi_file_url,
+          has_snapshot: !!alert.po_snapshot
+        })
+      })
+
+      console.log('🔄 Starting alert updates...')
+      console.log('PI fields to add/update:', {
+        pi_confirmed: true,
+        pi_received_date: dbFormattedDate,
+        pi_file_url: filePath
+      })
+
+      const updatePromises = existingAlerts.map((alert, idx) => {
+        // ✅ MERGE: Keep existing snapshot, only update PI-related fields
         const updatedSnapshot = {
-          ...(alert.po_snapshot || {}),
-          ...completePoSnapshot // Use the complete snapshot
+          ...(alert.po_snapshot || {}), // Keep all existing fields
+          pi_confirmed: true,            // Update PI fields only
+          pi_received_date: dbFormattedDate,
+          pi_file_url: filePath,
+          ...(poNumber && poNumber !== 'N/A' ? { po_number: poNumber } : {})
         }
+
+        console.log(`   Updating alert ${idx + 1} (ID: ${alert.id}):`)
+        console.log('     BEFORE:', alert.po_snapshot)
+        console.log('     AFTER:', updatedSnapshot)
 
         return supabase
           .from('alerts')
           .update({
             po_snapshot: updatedSnapshot,
-            is_read: false, // Mark as unread since PI was uploaded
-            updated_at: new Date().toISOString()
+            is_read: false,
           })
           .eq('id', alert.id)
       })
 
       const results = await Promise.all(updatePromises)
       
+      console.log('📊 Update results:')
+      results.forEach((result, idx) => {
+        if (result.error) {
+          console.error(`   ❌ Alert ${idx + 1} FAILED:`, result.error)
+        } else {
+          console.log(`   ✅ Alert ${idx + 1} SUCCESS`)
+        }
+      })
+
       const errors = results.filter(r => r.error)
       if (errors.length > 0) {
-        console.error('❌ Some alert updates failed:', errors)
+        console.error('❌ CRITICAL:', errors.length, 'alert updates failed')
+        console.error('❌ Failed updates:', errors)
       } else {
-        console.log('✅ Updated existing PO alerts with PI confirmation:', existingAlerts.length)
+        console.log('✅ All alert updates succeeded')
+      }
+
+      // VERIFICATION STEP
+      console.log('🔍 VERIFICATION: Re-fetching alerts to confirm updates...')
+      const { data: verifyAlerts, error: verifyError } = await supabase
+        .from('alerts')
+        .select('id, po_snapshot')
+        .eq('po_id', databasePoId)
+
+      if (verifyError) {
+        console.error('❌ Verification fetch failed:', verifyError)
+      } else {
+        console.log('🔍 Verification results:')
+        verifyAlerts?.forEach((alert, idx) => {
+          console.log(`   Alert ${idx + 1} (ID: ${alert.id}):`, {
+            pi_confirmed: alert.po_snapshot?.pi_confirmed,
+            pi_file_url: alert.po_snapshot?.pi_file_url ? 'EXISTS' : 'NULL'
+          })
+        })
       }
     }
+
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━')
 
     /* =========================
        FETCH MERCHANT MEMBERS FOR NEW PI ALERTS
@@ -1053,7 +1201,8 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
         success: true,
         poId: databasePoId,
         poNumber: finalPoNumber,
-        message: 'PI uploaded successfully (existing alerts updated)',
+        message: '[TEST] PI uploaded successfully (existing alerts updated, no emails sent)',
+        testMode: true
       })
     }
 
@@ -1082,18 +1231,32 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
     console.log('✅ Eligible members for new PI alerts:', eligibleMembers.length)
 
     /* =========================
-       CREATE NEW PI_UPLOAD ALERTS (with complete snapshot)
+       CREATE NEW PI_UPLOAD ALERTS (with complete snapshot, NO EMAIL)
     ========================= */
 
     if (eligibleMembers.length > 0) {
       const alertMessage =
         `PI uploaded for ${buyerNameText} → ${supplierNameText} (PO#${finalPoNumber})`
 
+      // ✅ Get the UPDATED snapshot from one of the existing PO alerts
+      // This ensures PI alert has the exact same data as PO alert after PI update
+      const completeSnapshotForPI = existingAlerts && existingAlerts.length > 0
+        ? {
+            ...(existingAlerts[0].po_snapshot || {}),
+            pi_confirmed: true,
+            pi_received_date: dbFormattedDate,
+            pi_file_url: filePath,
+            ...(poNumber && poNumber !== 'N/A' ? { po_number: poNumber } : {})
+          }
+        : completePoSnapshot // Fallback to complete snapshot if no existing alerts
+
+      console.log('📸 Complete snapshot for new PI alerts:', completeSnapshotForPI)
+
       const alerts = eligibleMembers.map(m => ({
         message: alertMessage,
         alert_type: 'PI_UPLOAD',
         po_id: databasePoId,
-        po_snapshot: completePoSnapshot, // ✅ Use complete snapshot with all fields
+        po_snapshot: completeSnapshotForPI, // ✅ Same snapshot as updated PO alert
         recipient_user_id: m.id,
         recipient_name: m.full_name,
         is_read: false,
@@ -1116,10 +1279,6 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
         console.log('✅ New PI alerts created successfully:', insertedAlerts?.length || 0)
         console.log('✅ Alert IDs:', insertedAlerts?.map(a => a.id))
       }
-
-      /* =========================
-         SEND EMAIL NOTIFICATIONS
-      ========================= */
 
       console.log('📧 Sending email notifications...')
       sendAlertEmail(
@@ -1151,7 +1310,9 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       success: true,
       poId: databasePoId,
       poNumber: finalPoNumber,
-      message: 'PI uploaded successfully',
+      message: '[TEST] PI uploaded successfully (no emails sent)',
+      testMode: true,
+      alertsUpdated: existingAlerts?.length || 0
     })
 
   } catch (err) {
@@ -1168,6 +1329,8 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
     })
   }
 })
+
+
 // router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) => {
 //   let filePath = null
 //   const BUCKET_NAME = 'POFY26'
@@ -1182,12 +1345,20 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //     }
 
 //     /* =========================
-//        FETCH PO
+//        FETCH PO (WITH MORE FIELDS)
 //     ========================= */
 
 //     const { data: poData, error: poError } = await supabase
 //       .from('purchase_orders')
-//       .select('po_file_url, po_number, buyer_supplier_link_id')
+//       .select(`
+//         id,
+//         po_file_url,
+//         po_number,
+//         po_received_date,
+//         quantity_ordered,
+//         amount,
+//         buyer_supplier_link_id
+//       `)
 //       .eq('id', databasePoId)
 //       .maybeSingle()
 
@@ -1308,7 +1479,69 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //       : poData.po_number
 
 //     /* =========================
-//        FETCH MERCHANT MEMBERS
+//        CREATE COMPLETE PO SNAPSHOT (with all fields)
+//     ========================= */
+
+//     const completePoSnapshot = {
+//       po_id: databasePoId,
+//       po_number: finalPoNumber,
+//       buyer_name: buyerNameText,
+//       supplier_name: supplierNameText,
+//       po_received_date: poData.po_received_date,
+//       quantity_ordered: poData.quantity_ordered,
+//       amount: poData.amount,
+//       pi_confirmed: true, // ✅ SET TO TRUE
+//       pi_received_date: dbFormattedDate,
+//       po_file_url: poData.po_file_url,
+//       pi_file_url: filePath
+//     }
+
+//     console.log('📸 Complete PO snapshot created:', completePoSnapshot)
+
+//     /* =========================
+//        FETCH EXISTING PO ALERTS & UPDATE THEM
+//     ========================= */
+
+//     const { data: existingAlerts, error: fetchAlertsError } = await supabase
+//       .from('alerts')
+//       .select('id, po_snapshot, recipient_user_id, recipient_name')
+//       .eq('po_id', databasePoId)
+//       .eq('alert_type', 'PO_UPLOAD')
+
+//     if (fetchAlertsError) {
+//       console.error('❌ Error fetching existing alerts:', fetchAlertsError)
+//     } else if (existingAlerts && existingAlerts.length > 0) {
+//       console.log('📋 Found existing PO alerts to update:', existingAlerts.length)
+
+//       const updatePromises = existingAlerts.map(alert => {
+//         // Merge existing snapshot with complete new data
+//         const updatedSnapshot = {
+//           ...(alert.po_snapshot || {}),
+//           ...completePoSnapshot // Use the complete snapshot
+//         }
+
+//         return supabase
+//           .from('alerts')
+//           .update({
+//             po_snapshot: updatedSnapshot,
+//             is_read: false, // Mark as unread since PI was uploaded
+//             updated_at: new Date().toISOString()
+//           })
+//           .eq('id', alert.id)
+//       })
+
+//       const results = await Promise.all(updatePromises)
+      
+//       const errors = results.filter(r => r.error)
+//       if (errors.length > 0) {
+//         console.error('❌ Some alert updates failed:', errors)
+//       } else {
+//         console.log('✅ Updated existing PO alerts with PI confirmation:', existingAlerts.length)
+//       }
+//     }
+
+//     /* =========================
+//        FETCH MERCHANT MEMBERS FOR NEW PI ALERTS
 //     ========================= */
 
 //     const { data: merchantOrg, error: merchantError } = await supabase
@@ -1324,7 +1557,13 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //     console.log('🏢 Merchant org:', merchantOrg)
 
 //     if (!merchantOrg) {
-//       console.warn('⚠️ No merchant organization found - skipping alerts')
+//       console.warn('⚠️ No merchant organization found - skipping new PI alerts')
+//       return res.json({
+//         success: true,
+//         poId: databasePoId,
+//         poNumber: finalPoNumber,
+//         message: 'PI uploaded successfully (existing alerts updated)',
+//       })
 //     }
 
 //     const { data: accessRows, error: accessError } = await supabase
@@ -1344,59 +1583,16 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //     }
 
 //     console.log('👥 Access rows fetched:', accessRows?.length || 0)
-//     console.log('🔍 Buyer Org ID used for query:', buyerOrgId)
 
 //     const eligibleMembers = (accessRows || [])
 //       .map(r => r.organization_members)
 //       .filter(m => m && merchantOrg && m.organization_id === merchantOrg.id)
 
-//     console.log('✅ Eligible members after filtering:', eligibleMembers.length)
-//     console.log('📋 Eligible members:', eligibleMembers)
-
-
-//     if (existingAlerts && existingAlerts.length > 0) {
-//   // Update alerts one by one to preserve individual snapshots
-//   const updatePromises = existingAlerts.map(alert =>
-//     supabase
-//       .from('alerts')
-//       .update({
-//         po_snapshot: {
-//           ...alert.po_snapshot,
-//           deleted: true,
-//           deleted_by: deletedBy,
-//           deleted_at: new Date().toISOString()
-//         }
-//       })
-//       .eq('id', alert.id)
-//   )
-
-//   const results = await Promise.all(updatePromises)
-  
-//   const errors = results.filter(r => r.error)
-//   if (errors.length > 0) {
-//     console.error('❌ Alert update errors:', errors)
-//   } else {
-//     console.log('✅ Updated alerts with deleted flag:', existingAlerts.length)
-//   }
-// }
+//     console.log('✅ Eligible members for new PI alerts:', eligibleMembers.length)
 
 //     /* =========================
-//        CREATE ALERTS + SNAPSHOT
+//        CREATE NEW PI_UPLOAD ALERTS (with complete snapshot)
 //     ========================= */
-
-//     const poSnapshot = {
-//       po_id: databasePoId,
-//       po_number: finalPoNumber,
-//       buyer_name: buyerNameText,
-//       supplier_name: supplierNameText,
-//       po_received_date: null,
-//       quantity_ordered: null,
-//       amount: null,
-//       pi_confirmed: true,
-//       pi_received_date: dbFormattedDate,
-//       po_file_url: poData.po_file_url,
-//       pi_file_url: filePath
-//     }
 
 //     if (eligibleMembers.length > 0) {
 //       const alertMessage =
@@ -1406,7 +1602,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //         message: alertMessage,
 //         alert_type: 'PI_UPLOAD',
 //         po_id: databasePoId,
-//         po_snapshot: poSnapshot,
+//         po_snapshot: completePoSnapshot, // ✅ Use complete snapshot with all fields
 //         recipient_user_id: m.id,
 //         recipient_name: m.full_name,
 //         is_read: false,
@@ -1415,7 +1611,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //         scheduled_for: new Date().toISOString()
 //       }))
 
-//       console.log('📨 Alerts to insert:', JSON.stringify(alerts, null, 2))
+//       console.log('📨 New PI alerts to insert:', alerts.length)
 
 //       const { data: insertedAlerts, error: alertError } = await supabase
 //         .from('alerts')
@@ -1426,11 +1622,14 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //         console.error('❌ Alert insert error:', alertError)
 //         console.error('❌ Alert error details:', JSON.stringify(alertError, null, 2))
 //       } else {
-//         console.log('✅ Alerts created successfully:', insertedAlerts?.length || 0)
+//         console.log('✅ New PI alerts created successfully:', insertedAlerts?.length || 0)
 //         console.log('✅ Alert IDs:', insertedAlerts?.map(a => a.id))
 //       }
 
-//       // Send email notifications
+//       /* =========================
+//          SEND EMAIL NOTIFICATIONS
+//       ========================= */
+
 //       console.log('📧 Sending email notifications...')
 //       sendAlertEmail(
 //         eligibleMembers.map(m => ({
@@ -1441,8 +1640,8 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //         {
 //           buyer_name: buyerNameText,
 //           supplier_name: supplierNameText,
-//           po_number: finalPoNumber, // ✅ Fixed: Use finalPoNumber instead of poId
-//           pi_received_date: dbFormattedDate // ✅ Fixed: Use pi_received_date instead of date
+//           po_number: finalPoNumber,
+//           pi_received_date: dbFormattedDate
 //         },
 //         'PI_UPLOAD'
 //       ).then(emailResult => {
@@ -1451,11 +1650,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //         console.error('❌ Email sending failed:', err)
 //       })
 //     } else {
-//       console.log('⚠️ No eligible members found - alerts not created')
-//       console.log('⚠️ Possible reasons:')
-//       console.log('   - No merchant organization exists')
-//       console.log('   - No member_organization_access records for buyer org')
-//       console.log('   - Members do not belong to merchant organization')
+//       console.log('⚠️ No eligible members found - new PI alerts not created')
 //     }
 
 //     /* =========================
@@ -1483,214 +1678,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 //   }
 // })
 
-router.post('/upload-pi/:poId', upload.single('piFile'), async (req, res) => {
-  let filePath = null
-  const BUCKET_NAME = 'POFY26'
 
-  try {
-    const databasePoId = req.params.poId
-    const { poNumber, piReceivedDate } = req.body  // ✅ Changed from 'poId' to 'poNumber'
-    const file = req.file
-
-    console.log('DATABASE PO ID:', databasePoId)
-    console.log('PO NUMBER:', poNumber)  // ✅ Updated log
-    console.log('BODY:', req.body)
-    console.log('FILE:', req.file)
-
-    // ✅ Validation: poNumber is optional (backward compatibility)
-    if (!databasePoId || !piReceivedDate || !file) {
-      return res.status(400).json({
-        error: 'Missing required fields: piReceivedDate or piFile',
-      })
-    }
-
-    // ---- Fetch existing PO to get directory path and current po_number ----
-    const { data: poData, error: fetchError } = await supabase
-      .from('purchase_orders')
-      .select('po_file_url, buyer_name, created_by, po_number')  // ✅ Also select po_number
-      .eq('id', databasePoId)
-      .single()
-
-    if (fetchError || !poData) {
-      return res.status(404).json({ error: 'Purchase Order not found' })
-    }
-
-    // ✅ Use provided poNumber if available, otherwise keep existing po_number
-    const finalPoNumber = poNumber && poNumber !== 'N/A' ? poNumber : poData.po_number
-    
-    const urlParts = poData.po_file_url.split('/')
-    const bucketIndex = urlParts.indexOf(BUCKET_NAME)
-    
-    if (bucketIndex === -1) {
-      throw new Error('Could not parse PO file path from URL')
-    }
-
-    // Extract path segments after bucket name until the filename
-    const pathSegments = urlParts.slice(bucketIndex + 1, -1)
-    const directoryPath = pathSegments.join('/')
-
-    // ---- Upload PI file to the same directory ----
-    const safeName = file.originalname.replace(/\s+/g, '_')
-    filePath = `${directoryPath}/pi_${Date.now()}_${safeName}`
-
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(filePath, file.buffer, {
-        contentType: file.mimetype,
-        upsert: false,
-      })
-
-    if (uploadError) throw uploadError
-
-
-    // ---- Format PI received date ----
-    const dateObj = new Date(piReceivedDate)
-    const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December']
-    const monthFolder = months[dateObj.getMonth()]
-    const dayFolder = String(dateObj.getDate()).padStart(2, '0')
-    const year = dateObj.getFullYear()
-    const dbFormattedDate = `${monthFolder}-${dayFolder}-${year}`
-
-    // ---- Update PO record with PI details ----
-    // ✅ Build update object conditionally
-    const updateData = {
-      pi_received_date: dbFormattedDate,
-      pi_file_url: filePath,
-      pi_confirmed: true
-    }
-
-    // ✅ Only update po_number if a new one was provided
-    if (poNumber && poNumber !== 'N/A') {
-      updateData.po_number = poNumber
-    }
-
-    const { data: updatedPO, error: updateError } = await supabase
-      .from('purchase_orders')
-      .update(updateData)
-      .eq('id', databasePoId)
-      .select()
-
-    if (updateError) throw updateError
-
-    // ---- ✅ CREATE ALERTS FOR PI UPLOAD ----
-    const shopifyAdminCustomers = await getShopifyAdminCustomers()
-
-    if (shopifyAdminCustomers.length > 0) {
-      const alertMessage = `PI uploaded for ${poData.buyer_name} (PO#${finalPoNumber}) by ${poData.created_by} on ${dbFormattedDate}`
-      
-      const alertInserts = shopifyAdminCustomers.map(customer => ({
-        message: alertMessage,
-        po_id: databasePoId,
-        recipient_user_id: customer.id.toString(),
-        recipient_name: customer.name || `${customer.first_name} ${customer.last_name}`,
-        is_read: false
-      }))
-
-      const { error: alertError } = await supabase
-        .from('alerts')
-        .insert(alertInserts)
-
-      if (alertError) {
-        console.error('Error creating PI alerts:', alertError)
-      } else {
-        console.log(`✅ Created ${alertInserts.length} PI alerts for admins`)
-
-        sendAlertEmail(
-      shopifyAdminCustomers,
-      alertMessage,
-      {
-        buyer_name: buyerName,
-        po_number: poId,
-        quantity_ordered: quantity,
-        amount: value,
-        date: dbFormattedDate
-      }
-      ).catch(err => console.error('Email failed:', err));
-      }
-    }
-
-    // ---- Success ----
-    return res.json({
-      success: true,
-      poId: databasePoId,
-      message: 'PI uploaded, PO updated, and alerts created',
-      piFileUrl: piFileUrl,
-      poNumber: finalPoNumber,  // ✅ Return the PO number used
-      alertsSent: shopifyAdminCustomers.length
-    })
-
-  } catch (err) {
-    console.error('PI Upload Error:', err)
-
-    // ---- Rollback file if DB update failed ----
-    if (filePath) {
-      await supabase.storage.from(BUCKET_NAME).remove([filePath])
-    }
-
-    res.status(500).json({ error: err.message || 'PI upload failed' })
-  }
-})
-
-
-async function getShopifyAdminCustomers() {
-  try {
-    // Using Shopify Admin API (GraphQL)
-    const query = `
-      query {
-        customers(first: 250, query: "metafields.custom.isadmin:true") {
-          edges {
-            node {
-              id
-              email
-              firstName
-              lastName
-              metafield(namespace: "custom", key: "isadmin") {
-                value
-              }
-            }
-          }
-        }
-      }
-    `
-
-    const response = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-07/graphql.json`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
-        },
-        body: JSON.stringify({ query })
-      }
-    )
-
-    const result = await response.json()
-
-    if (result.errors) {
-      console.error('Shopify GraphQL errors:', result.errors)
-      return []
-    }
-
-    // Filter and format admin customers
-    const adminCustomers = result.data.customers.edges
-      .filter(edge => edge.node.metafield?.value === 'true')
-      .map(edge => ({
-        id: edge.node.id.split('/').pop(), // Extract numeric ID from gid://shopify/Customer/123456
-        email: edge.node.email,
-        name: `${edge.node.firstName} ${edge.node.lastName}`.trim(),
-        first_name: edge.node.firstName,
-        last_name: edge.node.lastName
-      }))
-
-    console.log(`Found ${adminCustomers.length} admin customers`)
-    return adminCustomers
-
-  } catch (error) {
-    console.error('Error fetching admin customers:', error)
-    return []
-  }
-}
 
 
 // Get alerts for a user
