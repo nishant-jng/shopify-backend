@@ -91,6 +91,8 @@ const merchantsRoutes = require('./routes/merchants');
 const proxyRoutes = require('./routes/proxy');
 const tradeRoutes = require('./routes/trades');
 const travelRoutes = require('./routes/travelBill');
+const testRoutes = require('./routes/test');
+const buyersRoutes = require('./routes/buyers');
 
  
 // --- Environment Variable Validation ---
@@ -152,6 +154,8 @@ app.use("/proxy/merchants",merchantsRoutes)
 app.use('/proxy', proxyRoutes);
 app.use('/trades', tradeRoutes);
 app.use('/travel-bill', travelRoutes);
+app.use('/test', testRoutes);
+app.use('/volume', buyersRoutes);
 
 
 // --- Core Routes ---
