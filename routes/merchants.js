@@ -2354,8 +2354,7 @@ router.get("/buyer-details", async (req, res) => {
       organizations (
         id,
         display_name,
-        address_line_1,
-        address_line_2,
+        address,
         country,
         type
       )
