@@ -765,7 +765,7 @@ const MONTHS = [
 
 const router = express.Router();
 
-router.get("po-count-value/:buyerName", async (req, res) => {
+router.get("/po-count-value/:buyerName", async (req, res) => {
   try {
     const buyerName = req.params.buyerName.trim();
 
