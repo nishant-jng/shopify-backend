@@ -23,9 +23,12 @@
     "express": "^5.2.1",
     "express-rate-limit": "^8.0.1",
     "firebase-admin": "^13.5.0",
+    "fs": "^0.0.1-security",
     "google-libphonenumber": "^3.2.43",
     "multer": "^2.0.2",
     "nodemailer": "^7.0.6",
+    "path": "^0.12.7",
+    "pdfkit": "^0.17.2",
     "puppeteer": "^24.22.0",
     "resend": "^6.9.1",
     "xlsx": "^0.18.5"
