@@ -2328,6 +2328,53 @@ router.get("/buyers", async (req, res) => {
   res.json(buyers);
 });
 
+// Updated /buyers route — returns address fields for auto-fill
+router.get("/buyer-details", async (req, res) => {
+  const { email } = req.query;
+
+  if (!email) {
+    return res.status(400).json({ error: "Missing email" });
+  }
+
+  // 1. Find member by email
+  const { data: member, error: memberError } = await supabase
+    .from("organization_members")
+    .select("id")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (memberError || !member) {
+    return res.status(403).json({ error: "Invalid member" });
+  }
+
+  // 2. Fetch buyers this member can access — include address fields
+  const { data, error } = await supabase
+    .from("member_organization_access")
+    .select(`
+      organizations (
+        id,
+        display_name,
+        address_line_1,
+        address_line_2,
+        country,
+        type
+      )
+    `)
+    .eq("member_id", member.id)
+    .eq("organizations.type", "buyer");
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Filter out nulls (from the inner join filter) and flatten
+  const buyers = data
+    .map((row) => row.organizations)
+    .filter(Boolean);
+
+  res.json(buyers);
+});
+
 
 
 router.post('/delete-po/:poId', async (req, res) => {
