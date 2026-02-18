@@ -899,7 +899,7 @@ function extractPathFromUrl(fileUrl) {
 }
 
 
-router.post('upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) => {
+router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) => {
   let filePath = null
   const BUCKET_NAME = 'POFY26'
 
