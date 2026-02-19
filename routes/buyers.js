@@ -824,4 +824,46 @@ router.get("/po-count-value/:buyerName", async (req, res) => {
   }
 });
 
+router.get("/po-count-value/all", async (req, res) => {
+  try {
+    const filePath = path.join(__dirname, "..", "public", "openpos.xlsx");
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(500).json({ success: false, message: `Excel file not found.` });
+    }
+
+    // Expect comma-separated buyer names: ?buyers=NKUKU,HOUSE DOCTOR
+    const allowedBuyers = req.query.buyers
+      ? req.query.buyers.split(',').map(b => b.trim().toUpperCase()).filter(Boolean)
+      : [];
+
+    if (!allowedBuyers.length) {
+      return res.status(400).json({ success: false, message: 'No buyers specified.' });
+    }
+
+    const workbook = XLSX.read(filePath, { type: "file" });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: 0 });
+
+    const buyerBreakdown = {};
+
+    data.slice(1).forEach(row => {
+      const name = row[0]?.toString().trim();
+      if (!name || name.toLowerCase() === 'total') return;
+      if (!allowedBuyers.includes(name.toUpperCase())) return; // filter here
+
+      buyerBreakdown[name] = MONTHS.map(({ month, countCol, valueCol }) => ({
+        month,
+        count: row[countCol] || 0,
+        value: row[valueCol] || 0,
+      }));
+    });
+
+    return res.json({ success: true, buyerBreakdown });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 module.exports = router;
