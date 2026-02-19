@@ -905,10 +905,10 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
 
   try {
     const databasePoId = req.params.poId
-    const { poNumber, piReceivedDate } = req.body
+    const { poNumber, piReceivedDate, exFactoryDate } = req.body
     const file = req.file
 
-    if (!databasePoId || !piReceivedDate || !file) {
+    if (!databasePoId || !piReceivedDate || !file || !exFactoryDate) {
       return res.status(400).json({ error: 'Missing required fields' })
     }
 
@@ -1012,14 +1012,18 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
     ========================= */
 
     const d = new Date(piReceivedDate)
+    const f= new Date(exFactoryDate)
     const months = [
       'January','February','March','April','May','June',
       'July','August','September','October','November','December'
     ]
     const dbFormattedDate =
       `${months[d.getMonth()]}-${String(d.getDate()).padStart(2,'0')}-${d.getFullYear()}`
+      const dbFormattedExFactoryDate =
+      `${months[f.getMonth()]}-${String(f.getDate()).padStart(2,'0')}-${f.getFullYear()}`
 
     console.log('📅 Formatted date:', dbFormattedDate)
+    console.log('📅 Formatted ex factory date:', dbFormattedExFactoryDate)
 
     /* =========================
        UPDATE PO
@@ -1029,6 +1033,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       .from('purchase_orders')
       .update({
         pi_received_date: dbFormattedDate,
+        ex_factory_date: dbFormattedExFactoryDate,
         pi_file_url: filePath,
         pi_confirmed: true,
         ...(poNumber && poNumber !== 'N/A' ? { po_number: poNumber } : {})
@@ -1060,6 +1065,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       amount: poData.amount,
       pi_confirmed: true,
       pi_received_date: dbFormattedDate,
+      ex_factory_date: dbFormattedExFactoryDate,
       po_file_url: poData.po_file_url,
       pi_file_url: filePath,
     }
@@ -1112,6 +1118,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
       console.log('PI fields to add/update:', {
         pi_confirmed: true,
         pi_received_date: dbFormattedDate,
+        ex_factory_date: dbFormattedExFactoryDate,
         pi_file_url: filePath
       })
 
@@ -1121,6 +1128,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
           ...(alert.po_snapshot || {}), // Keep all existing fields
           pi_confirmed: true,            // Update PI fields only
           pi_received_date: dbFormattedDate,
+          ex_factory_date: dbFormattedExFactoryDate,
           pi_file_url: filePath,
           ...(poNumber && poNumber !== 'N/A' ? { po_number: poNumber } : {})
         }
@@ -1245,6 +1253,7 @@ router.post('/upload-buyer-pi/:poId', upload.single('piFile'), async (req, res) 
             ...(existingAlerts[0].po_snapshot || {}),
             pi_confirmed: true,
             pi_received_date: dbFormattedDate,
+            ex_factory_date: dbFormattedExFactoryDate,
             pi_file_url: filePath,
             ...(poNumber && poNumber !== 'N/A' ? { po_number: poNumber } : {})
           }
