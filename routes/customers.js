@@ -4108,6 +4108,27 @@ router.get("/customer/:customerId/volume-origin", async (req, res) => {
       // Sort by value descending
       originData.sort((a, b) => b.value - a.value);
     }
+    let clientData = [];
+if (totalIndex !== -1) {
+  // Use TOTAL rows per buyer for client aggregation
+  const clientTotals = {};
+  filteredData.forEach((row) => {
+    if (row.isTotalRow && row.total &&
+        !(row.buyer.toUpperCase().includes('GRAND') && row.buyer.toUpperCase().includes('TOTAL'))) {
+      const clientName = row.buyer.replace(/ TOTAL$/, "").trim();
+      if (!clientTotals[clientName]) clientTotals[clientName] = 0;
+      clientTotals[clientName] += row.total;
+    }
+  });
+
+  clientData = Object.entries(clientTotals)
+    .map(([client, value]) => ({
+      client,
+      value,
+      percentage: grandTotalValue > 0 ? (value / grandTotalValue) * 100 : 0
+    }))
+    .sort((a, b) => b.value - a.value);
+}
 
     // Calculate grand total
     if (totalIndex !== -1) {
@@ -4135,6 +4156,7 @@ router.get("/customer/:customerId/volume-origin", async (req, res) => {
         hasTotal: totalIndex !== -1,
         hasOrigin: originIndex !== -1,
         originData: originData, // Array of {origin, value, percentage}
+        clientData: clientData,
         grandTotalValue: grandTotalValue, // For reference
       },
       customerBuyers: allowedBuyers, // Include for debugging/transparency
