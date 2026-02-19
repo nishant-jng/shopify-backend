@@ -765,65 +765,6 @@ const MONTHS = [
 
 const router = express.Router();
 
-router.get("/po-count-value/:buyerName", async (req, res) => {
-  try {
-    const buyerName = req.params.buyerName.trim();
-
-    // Read the Excel file from /public in the project root
-    const filePath = path.join(__dirname, "..", "public", "openpos.xlsx");
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(500).json({
-        success: false,
-        message: `Excel file not found at ${filePath}. Make sure poCountandValue.xlsx is in the /public folder.`,
-      });
-    }
-
-    const workbook = XLSX.read(filePath, { type: "file" });
-    const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: 0 });
-
-    // Find buyer row (case-insensitive match, skip header)
-    const buyerRow = data.slice(1).find(
-      (row) =>
-        row[0] &&
-        row[0].toString().trim().toLowerCase() === buyerName.toLowerCase()
-    );
-
-    if (!buyerRow) {
-      return res.status(404).json({
-        success: false,
-        message: `Buyer "${buyerName}" not found.`,
-        availableBuyers: data
-          .slice(1)
-          .filter((r) => r[0] && r[0] !== "Total")
-          .map((r) => r[0]),
-      });
-    }
-
-    // Build monthly breakdown
-    const monthlyData = MONTHS.map(({ month, countCol, valueCol }) => ({
-      month,
-      count: buyerRow[countCol] || 0,
-      value: buyerRow[valueCol] || 0,
-    }));
-
-    const totalCount = monthlyData.reduce((sum, m) => sum + m.count, 0);
-    const totalValue = monthlyData.reduce((sum, m) => sum + m.value, 0);
-
-    return res.json({
-      success: true,
-      buyer: buyerRow[0],
-      totalCount,
-      totalValue: Math.round(totalValue * 100) / 100,
-      monthly: monthlyData,
-    });
-  } catch (err) {
-    console.error("Error:", err.message);
-    return res.status(500).json({ success: false, message: err.message });
-  }
-});
-
 router.get("/po-count-value/all", async (req, res) => {
   try {
     const filePath = path.join(__dirname, "..", "public", "openpos.xlsx");
@@ -865,5 +806,66 @@ router.get("/po-count-value/all", async (req, res) => {
     return res.status(500).json({ success: false, message: err.message });
   }
 });
+
+// router.get("/po-count-value/:buyerName", async (req, res) => {
+//   try {
+//     const buyerName = req.params.buyerName.trim();
+
+//     // Read the Excel file from /public in the project root
+//     const filePath = path.join(__dirname, "..", "public", "openpos.xlsx");
+
+//     if (!fs.existsSync(filePath)) {
+//       return res.status(500).json({
+//         success: false,
+//         message: `Excel file not found at ${filePath}. Make sure poCountandValue.xlsx is in the /public folder.`,
+//       });
+//     }
+
+//     const workbook = XLSX.read(filePath, { type: "file" });
+//     const sheet = workbook.Sheets[workbook.SheetNames[0]];
+//     const data = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: 0 });
+
+//     // Find buyer row (case-insensitive match, skip header)
+//     const buyerRow = data.slice(1).find(
+//       (row) =>
+//         row[0] &&
+//         row[0].toString().trim().toLowerCase() === buyerName.toLowerCase()
+//     );
+
+//     if (!buyerRow) {
+//       return res.status(404).json({
+//         success: false,
+//         message: `Buyer "${buyerName}" not found.`,
+//         availableBuyers: data
+//           .slice(1)
+//           .filter((r) => r[0] && r[0] !== "Total")
+//           .map((r) => r[0]),
+//       });
+//     }
+
+//     // Build monthly breakdown
+//     const monthlyData = MONTHS.map(({ month, countCol, valueCol }) => ({
+//       month,
+//       count: buyerRow[countCol] || 0,
+//       value: buyerRow[valueCol] || 0,
+//     }));
+
+//     const totalCount = monthlyData.reduce((sum, m) => sum + m.count, 0);
+//     const totalValue = monthlyData.reduce((sum, m) => sum + m.value, 0);
+
+//     return res.json({
+//       success: true,
+//       buyer: buyerRow[0],
+//       totalCount,
+//       totalValue: Math.round(totalValue * 100) / 100,
+//       monthly: monthlyData,
+//     });
+//   } catch (err) {
+//     console.error("Error:", err.message);
+//     return res.status(500).json({ success: false, message: err.message });
+//   }
+// });
+
+
 
 module.exports = router;
