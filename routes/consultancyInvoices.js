@@ -710,7 +710,9 @@ router.get('/next-invoice-number', async (req, res) => {
 
     return res.json({
       initialized: true,
-      invoiceNo
+      invoiceNo,
+      prefix: series.prefix,          // ✅ add these two
+      financial_year: series.financial_year
     });
 
   } catch (err) {
