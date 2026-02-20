@@ -2363,6 +2363,7 @@ router.get("/buyer-details", async (req, res) => {
     .select(`
       organizations (
         id,
+        name,
         display_name,
         address,
         country,
