@@ -1797,7 +1797,7 @@ router.get('/my-alerts', async (req, res) => {
       `)
       .in('recipient_user_id', recipientIds)
       .order('created_at', { ascending: false })
-      .limit(200)
+      .limit(300)
 
     if (error) throw error
 
