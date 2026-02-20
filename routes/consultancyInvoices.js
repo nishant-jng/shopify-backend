@@ -697,7 +697,8 @@ router.get('/next-invoice-number', async (req, res) => {
     if (!series.initialized) {
       return res.json({
         initialized: false,
-        prefix: series.prefix
+        prefix: series.prefix,
+        financial_year: series.financial_year
       });
     }
 
