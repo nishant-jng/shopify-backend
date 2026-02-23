@@ -460,6 +460,7 @@ router.post("/generate-invoice", async (req, res) => {
       success: true,
       invoiceId: record.id,
       downloadUrl,
+      viewUrl: `/apps/proxy-1/consultancy/view-invoice/${record.id}`,
       message: "Invoice generated successfully.",
     });
 
@@ -501,18 +502,37 @@ router.get("/next-invoice-number", async (req, res) => {
       });
     }
 
-    // Normal: return what the next auto number will be (preview only — not claimed yet)
-    const nextNumber = series.auto_current_number + 1;
+    // Walk forward from current_number until we find a free slot
+    let nextNumber = series.auto_current_number + 1;
+    const maxAttempts = 50;
+    let attempts = 0;
+
+    while (attempts < maxAttempts) {
+    const padded = String(nextNumber).padStart(3, "0");
+    const candidate = `${series.prefix}-${padded}N-${series.financial_year}`;
+
+    const { data: existing } = await supabase
+        .from("consultancy_invoices")
+        .select("id")
+        .eq("invoice_number", candidate)
+        .maybeSingle();
+
+    if (!existing) break;
+
+    nextNumber++;
+    attempts++;
+    }
+
     const padded = String(nextNumber).padStart(3, "0");
     const invoiceNo = `${series.prefix}-${padded}N-${series.financial_year}`;
 
     return res.json({
-      configured: true,
-      auto_initialized: true,
-      invoiceNo,
-      prefix: series.prefix,
-      financial_year: series.financial_year,
-      current_number: series.auto_current_number,
+    configured: true,
+    auto_initialized: true,
+    invoiceNo,
+    prefix: series.prefix,
+    financial_year: series.financial_year,
+    current_number: series.auto_current_number,
     });
 
   } catch (err) {
@@ -521,11 +541,94 @@ router.get("/next-invoice-number", async (req, res) => {
   }
 });
 
+//view invoice
+router.get("/view-invoice/:invoiceId", async (req, res) => {
+  try {
+    const { invoiceId } = req.params;
+
+    const { data: invoice } = await supabase
+      .from("consultancy_invoices")
+      .select("pdf_path")
+      .eq("id", invoiceId)
+      .single();
+
+    if (!invoice) return res.status(404).json({ error: "Not found" });
+
+    const { data, error } = await supabase.storage
+      .from("invoice-documents")
+      .download(invoice.pdf_path);
+
+    if (error) throw error;
+
+    const arrayBuffer = await data.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    // This header is the key — tells browser to display, not download
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", "inline");
+    res.send(buffer);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to serve invoice" });
+  }
+});
+
 module.exports = router;
 
+// Frontend — update the open block
+// if (result.viewUrl) {
+//   window.open(result.viewUrl, '_blank');
+// }
 
 
+router.get('/invoices', async (req, res) => {
+  try {
+    const { shopifyCustomerId } = req.query;
 
+    if (!shopifyCustomerId) {
+      return res.status(400).json({ error: 'shopifyCustomerId required' });
+    }
+
+    // Resolve member
+    const { data: member } = await supabase
+      .from('organization_members')
+      .select('id, organization_id')
+      .eq('shopify_customer_id', shopifyCustomerId)
+      .maybeSingle();
+
+    if (!member) {
+      return res.status(400).json({ error: 'Member not found.' });
+    }
+
+    const { data: invoices, error } = await supabase
+      .from('consultancy_invoices')
+      .select(`
+        id,
+        invoice_number,
+        invoice_date,
+        amount,
+        currency,
+        status,
+        invoice_mode,
+        financial_year,
+        pdf_path,
+        created_at,
+        buyer_org_id
+      `)
+      .order('created_at', { ascending: false });
+  
+    //   .eq('buyer_org_id', member.organization_id) // scope to their org
+
+    if (error) throw error;
+
+    return res.json({ invoices });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch invoices.' });
+  }
+});
 
 
 
