@@ -4100,6 +4100,418 @@ router.get("/customer/:customerId/volume-shipped-ytd", async (req, res) => {
   }
 });
 
+router.get("/customer/:customerId/admin-volume-origin", async (req, res) => {
+  try {
+    const { customerId } = req.params;
+    const { merchant } = req.query; // ← NEW: optional admin merchant override
+
+    if (!customerId) {
+      return res.status(401).json({
+        error: "Unauthorized",
+        details: "Customer ID is required"
+      });
+    }
+
+    // ── STEP 1: Fetch logged-in customer's buyers metafield (unchanged) ──
+    const customerQuery = `
+      query getCustomerBuyers($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          metafield(namespace: "custom", key: "buyers") {
+            value
+          }
+        }
+      }
+    `;
+
+    const customerResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: {
+        query: customerQuery,
+        variables: { customerId: `gid://shopify/Customer/${customerId}` }
+      },
+    });
+
+    const customerBuyersValue = customerResponse.data?.data?.customer?.metafield?.value;
+
+    let allowedBuyers = [];
+    if (customerBuyersValue) {
+      try {
+        const parsed = JSON.parse(customerBuyersValue);
+        allowedBuyers = Array.isArray(parsed)
+          ? parsed.map(b => b.trim().toUpperCase()).filter(b => b)
+          : [customerBuyersValue.trim().toUpperCase()];
+      } catch (e) {
+        allowedBuyers = customerBuyersValue
+          .split(',')
+          .map(b => b.trim().toUpperCase())
+          .filter(b => b);
+      }
+    }
+
+    // ── STEP 2 (NEW): If ?merchant= passed, check if admin and override buyers ──
+    if (merchant && allowedBuyers.length > 0) {
+
+      // Fetch the volume Excel first to know total buyer count
+      // (We do this below anyway — but we need it here for admin detection)
+      // Instead, use a simpler heuristic: admins have ALL buyers in their metafield.
+      // We'll detect this after parsing the Excel. For now, store the override email.
+      // The actual override happens after we know total buyer count (see STEP 3 below).
+    }
+
+    console.log("Customer ID:", customerId);
+    console.log("Raw customer buyers value:", customerBuyersValue);
+    console.log("Customer allowed buyers (normalized):", allowedBuyers);
+
+    // ── Fetch shop metafield for Excel file (completely unchanged) ────────
+    const query = `
+      query getShopMetafield {
+        shop {
+          metafield(namespace: "custom", key: "volumeshippedytd") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query },
+    });
+
+    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Excel file not found",
+        details: "No volumeshippedytd metafield found",
+        debugInfo: shopifyResponse.data
+      });
+    }
+
+    let fileUrl;
+
+    if (metafieldData.type === "file_reference") {
+      const fileId = metafieldData.value;
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile { url }
+            ... on MediaImage { image { url } }
+          }
+        }
+      `;
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId } },
+      });
+      fileUrl = fileResponse.data?.data?.node?.url || fileResponse.data?.data?.node?.image?.url;
+      if (!fileUrl) {
+        return res.status(404).json({ error: "File URL not found" });
+      }
+    } else {
+      fileUrl = metafieldData.value;
+    }
+
+    const fileResponse = await axios({ method: "GET", url: fileUrl, responseType: "arraybuffer" });
+
+    // ── Parse Excel (completely unchanged) ───────────────────────────────
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: false,
+    });
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({ error: "Empty file" });
+    }
+
+    let headerRowIndex = 0;
+    for (let i = 0; i < jsonData.length; i++) {
+      if (jsonData[i] && jsonData[i].length > 0 && jsonData[i][0]) {
+        headerRowIndex = i;
+        break;
+      }
+    }
+
+    const headers = jsonData[headerRowIndex].map((h) =>
+      h?.toString().trim().replace(/\u00A0/g, " ").replace(/\s+/g, " ")
+    );
+
+    const totalIndex = headers.findIndex(h => h.toLowerCase() === 'total');
+    const originIndex = headers.findIndex(h => h.toLowerCase() === 'origin');
+
+    let monthColumns = [];
+    if (totalIndex !== -1) {
+      monthColumns = headers.slice(2, totalIndex);
+    } else {
+      monthColumns = headers.slice(2).filter(h =>
+        h.toLowerCase() !== 'origin' && h.toLowerCase() !== 'total'
+      );
+    }
+
+    const rows = jsonData.slice(headerRowIndex + 1).filter(row =>
+      row && row.length > 0 && (row[0] || row[1])
+    );
+
+    const cleanNumber = (val) => {
+      if (val === null || val === undefined || val === "") return 0;
+      if (typeof val === "number") return val;
+      if (typeof val === "string") {
+        const cleaned = val.replace(/[^0-9.\-]/g, "");
+        return cleaned ? parseFloat(cleaned) : 0;
+      }
+      return 0;
+    };
+
+    const parsedData = rows.map((row) => {
+      const buyerRaw = row[0]?.toString().trim().toUpperCase() || "";
+      const obj = {
+        buyer: buyerRaw,
+        vendor: row[1]?.toString().trim() || "",
+        isTotalRow: buyerRaw.endsWith(" TOTAL"),
+      };
+      monthColumns.forEach((month) => {
+        const monthIndex = headers.indexOf(month);
+        obj[month] = cleanNumber(row[monthIndex]);
+      });
+      if (totalIndex !== -1) obj.total = cleanNumber(row[totalIndex]);
+      if (originIndex !== -1) obj.origin = row[originIndex]?.toString().trim() || "";
+      return obj;
+    });
+
+    // ── STEP 3 (NEW): Admin detection + buyer override ────────────────────
+    // Get all unique non-TOTAL buyers in the sheet
+    const allBuyersInSheet = [...new Set(
+      parsedData
+        .map(r => r.buyer.replace(/ TOTAL$/, "").trim().toUpperCase())
+        .filter(b => b && !b.includes("GRAND"))
+    )];
+    const totalBuyerCount = allBuyersInSheet.length;
+
+    // Admin = their metafield buyers covers all buyers in the sheet
+    const isAdmin = allowedBuyers.filter(b => !b.includes("TOTAL")).length >= totalBuyerCount;
+
+    // If admin passed ?merchant= param, fetch THAT customer's buyers from Shopify
+    if (isAdmin && merchant) {
+      // Find the Shopify customer by email to get their buyers metafield
+      const merchantLookupQuery = `
+        query findCustomerByEmail($email: String!) {
+          customers(first: 1, query: $email) {
+            edges {
+              node {
+                id
+                metafield(namespace: "custom", key: "buyers") {
+                  value
+                }
+              }
+            }
+          }
+        }
+      `;
+
+      const merchantResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: {
+          query: merchantLookupQuery,
+          variables: { email: `email:${merchant}` }
+        },
+      });
+
+      const merchantBuyersValue = merchantResponse.data?.data?.customers?.edges?.[0]?.node?.metafield?.value;
+
+      if (merchantBuyersValue) {
+        try {
+          const parsed = JSON.parse(merchantBuyersValue);
+          allowedBuyers = Array.isArray(parsed)
+            ? parsed.map(b => b.trim().toUpperCase()).filter(b => b)
+            : [merchantBuyersValue.trim().toUpperCase()];
+        } catch (e) {
+          allowedBuyers = merchantBuyersValue
+            .split(',')
+            .map(b => b.trim().toUpperCase())
+            .filter(b => b);
+        }
+        console.log(`Admin viewing merchant ${merchant}, buyers overridden to:`, allowedBuyers);
+      }
+    }
+    // ── END STEP 3 ────────────────────────────────────────────────────────
+
+    // ── Everything below is 100% unchanged from your original route ───────
+
+    const filteredData = allowedBuyers.length > 0
+      ? parsedData.filter(row => {
+          const buyerName = row.buyer.replace(/ TOTAL$/, "").trim().toUpperCase();
+          return allowedBuyers.includes(buyerName);
+        })
+      : parsedData;
+
+    console.log("Total parsed rows:", parsedData.length);
+    console.log("Filtered data rows:", filteredData.length);
+
+    if (filteredData.length === 0 && allowedBuyers.length > 0) {
+      return res.json({
+        success: true,
+        data: {
+          headers,
+          rows: [],
+          summary: { totalRows: 0, totalsByMonth: {}, totalsByBuyer: {}, totalsByVendor: {}, totalsByOrigin: {}, grandTotal: 0 },
+          rowCount: 0,
+          months: monthColumns,
+          hasTotal: totalIndex !== -1,
+          hasOrigin: originIndex !== -1,
+        },
+        message: "No data available for your assigned buyers",
+        customerBuyers: allowedBuyers
+      });
+    }
+
+    const summary = {
+      totalRows: filteredData.length,
+      totalsByMonth: {},
+      totalsByBuyer: {},
+      totalsByVendor: {},
+      totalsByOrigin: {},
+      grandTotal: 0,
+    };
+
+    monthColumns.forEach((month) => {
+      summary.totalsByMonth[month] = filteredData.reduce((sum, row) => sum + (row[month] || 0), 0);
+    });
+
+    filteredData.forEach((row) => {
+      if (row.buyer) {
+        if (!summary.totalsByBuyer[row.buyer]) summary.totalsByBuyer[row.buyer] = 0;
+        if (totalIndex !== -1 && row.total) {
+          summary.totalsByBuyer[row.buyer] += row.total;
+        } else {
+          monthColumns.forEach((month) => { summary.totalsByBuyer[row.buyer] += row[month] || 0; });
+        }
+      }
+    });
+
+    filteredData.forEach((row) => {
+      if (row.vendor) {
+        if (!summary.totalsByVendor[row.vendor]) summary.totalsByVendor[row.vendor] = 0;
+        if (totalIndex !== -1 && row.total) {
+          summary.totalsByVendor[row.vendor] += row.total;
+        } else {
+          monthColumns.forEach((month) => { summary.totalsByVendor[row.vendor] += row[month] || 0; });
+        }
+      }
+    });
+
+    let originData = [];
+    let grandTotalValue = 0;
+
+    if (originIndex !== -1 && totalIndex !== -1) {
+      filteredData.forEach((row) => {
+        if (row.isTotalRow && row.origin && row.total &&
+            !(row.buyer.toUpperCase().includes('GRAND') && row.buyer.toUpperCase().includes('TOTAL'))) {
+          if (!summary.totalsByOrigin[row.origin]) summary.totalsByOrigin[row.origin] = 0;
+          summary.totalsByOrigin[row.origin] += row.total;
+        }
+      });
+
+      grandTotalValue = Object.values(summary.totalsByOrigin).reduce((sum, val) => sum + val, 0);
+
+      Object.entries(summary.totalsByOrigin).forEach(([origin, value]) => {
+        originData.push({
+          origin,
+          value,
+          percentage: grandTotalValue > 0 ? (value / grandTotalValue) * 100 : 0
+        });
+      });
+
+      originData.sort((a, b) => b.value - a.value);
+    }
+
+    let clientData = [];
+    if (totalIndex !== -1) {
+      const clientTotals = {};
+      filteredData.forEach((row) => {
+        if (row.isTotalRow && row.total &&
+            !(row.buyer.toUpperCase().includes('GRAND') && row.buyer.toUpperCase().includes('TOTAL'))) {
+          const clientName = row.buyer.replace(/ TOTAL$/, "").trim();
+          if (!clientTotals[clientName]) clientTotals[clientName] = 0;
+          clientTotals[clientName] += row.total;
+        }
+      });
+
+      clientData = Object.entries(clientTotals)
+        .map(([client, value]) => ({
+          client,
+          value,
+          percentage: grandTotalValue > 0 ? (value / grandTotalValue) * 100 : 0
+        }))
+        .sort((a, b) => b.value - a.value);
+    }
+
+    if (totalIndex !== -1) {
+      summary.grandTotal = filteredData.reduce((sum, row) => sum + (row.total || 0), 0);
+    } else {
+      summary.grandTotal = Object.values(summary.totalsByMonth).reduce((sum, val) => sum + val, 0);
+    }
+
+    res.json({
+      success: true,
+      data: {
+        headers,
+        rows: filteredData,
+        summary,
+        rowCount: filteredData.length,
+        months: monthColumns,
+        hasTotal: totalIndex !== -1,
+        hasOrigin: originIndex !== -1,
+        originData,
+        clientData,
+        grandTotalValue,
+      },
+      customerBuyers: allowedBuyers,
+    });
+
+  } catch (err) {
+    console.error("Error fetching/parsing Excel file:", err.message);
+    console.error("Full error:", err);
+    if (err.response?.status === 404) {
+      return res.status(404).json({ error: "File not found", details: "The Excel file URL is not accessible" });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message || "An unexpected error occurred",
+      stack: process.env.NODE_ENV === "development" ? err.stack : undefined,
+    });
+  }
+});
+
 router.get("/customer/:customerId/volume-origin", async (req, res) => {
   try {
     // Get customer ID from request (adjust based on your auth setup)
