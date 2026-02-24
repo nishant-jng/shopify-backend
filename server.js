@@ -79,7 +79,7 @@ app.use("/visual-search", visualSearchRoutes);
 app.use("/proxy/merchants",merchantsRoutes)
 app.use('/proxy', proxyRoutes);
 app.use('/trades', tradeRoutes);
-app.use('/travel-bill', travelRoutes);
+app.use('/proxy/travel-bill', travelRoutes);
 app.use('/test', testRoutes);
 app.use('/volume', buyersRoutes);
 app.use('/proxy/consultancy', consultancyInvoicesRoutes);
