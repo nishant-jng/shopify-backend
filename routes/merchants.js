@@ -2485,8 +2485,8 @@ router.post('/delete-po/:poId', async (req, res) => {
           .from('alerts')
           .update({
             po_snapshot: {
-              ...(alert.po_snapshot || {}),  // ✅ guard against null snapshot
-              delete_meta: deleteMeta        // ✅ same object, guaranteed consistent
+              ...(alert.po_snapshot || {}),  
+              delete_meta: deleteMeta        
             }
           })
           .eq('id', alert.id)
@@ -2551,7 +2551,9 @@ router.post('/delete-po/:poId', async (req, res) => {
           po_number:         po.po_number,
           quantity_ordered:  po.quantity_ordered,
           amount:            po.amount,
-          date:              po.po_received_date
+          date:              po.po_received_date,
+          deleted_by:        member.full_name,
+          reason:            reason || 'No reason provided'
         },
         'PO_DELETED'
       ).catch(err => console.error('❌ Delete email failed:', err));

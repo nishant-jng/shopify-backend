@@ -189,30 +189,31 @@ function generateEmailTemplate(alertType, alertMessage, poDetails) {
       };
 
     // ── PO deleted ───────────────────────────
-    case 'PO_DELETED':
-      return {
-        subject: `Purchase Order Deleted — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
-        html: wrapTemplate({
-          accentColor: '#000000',
-          iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><polyline points="3 6 5 6 21 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
-          badgeLabel: 'Deleted',
-          badgeColor: '#000000',
-          title: 'Purchase Order Deleted',
-          subtitle: `Order permanently removed · PO#${poDetails.po_number || 'N/A'}`,
-          rows: [
-            ['Buyer',           poDetails.buyer_name],
-            ['Supplier',        poDetails.supplier_name],
-            ['PO Number',       poDetails.po_number],
-            ['Quantity',        poDetails.quantity_ordered],
-            ['Order Amount',    poDetails.amount],
-            ['Deleted On',      poDetails.deleted_date || poDetails.date || new Date().toLocaleDateString()],
-          ],
-          calloutBg: '#f9f9f9',
-          calloutBorder: '#000000',
-          calloutText: '<strong>Notice:</strong> This purchase order has been permanently removed from the system. If this was unintentional, please contact your administrator immediately.',
-        }),
-      };
-
+   case 'PO_DELETED':
+  return {
+    subject: `Purchase Order Deleted — ${poDetails.buyer_name || 'Unknown Buyer'} · PO#${poDetails.po_number || 'N/A'}`,
+    html: wrapTemplate({
+      accentColor: '#000000',
+      iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><polyline points="3 6 5 6 21 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M10 11v6M14 11v6" stroke="white" stroke-width="1.8" stroke-linecap="round"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+      badgeLabel: 'Deleted',
+      badgeColor: '#000000',
+      title: 'Purchase Order Deleted',
+      subtitle: `Order removed · PO#${poDetails.po_number || 'N/A'}`,
+      rows: [
+        ['Buyer',        poDetails.buyer_name],
+        ['Supplier',     poDetails.supplier_name],
+        ['PO Number',    poDetails.po_number],
+        ['Quantity',     poDetails.quantity_ordered],
+        ['Order Amount', poDetails.amount],
+        ['Date',         poDetails.date],
+        ['Deleted By',   poDetails.deleted_by],      
+        ['Reason',       poDetails.reason],            
+      ],
+      calloutBg: '#f9f9f9',
+      calloutBorder: '#000000',
+      calloutText: `<strong>Notice:</strong> ${alertMessage}`, 
+    }),
+  };
     // ── Default / fallback ───────────────────
     default:
       return {
