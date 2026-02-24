@@ -1310,6 +1310,396 @@ router.delete("/customer/:customerId",authenticate, async (req, res) => {
 //   }
 // });
 
+router.get("/customer/:customerId/admin-merchant-performance", async (req, res) => {
+  const { customerId } = req.params;
+  const { buyer, merchant } = req.query; // merchant = email filter for admins
+
+  if (!customerId) {
+    return res.status(400).json({
+      error: "Invalid customerId",
+      details: "customerId is required",
+    });
+  }
+
+  try {
+    // ── 1. Fetch customer email + buyers metafield ──────────────────────────
+    const customerQuery = `
+      query getCustomer($customerId: ID!) {
+        customer(id: $customerId) {
+          id
+          email
+          metafield(namespace: "custom", key: "buyers") {
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const customerResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: {
+        query: customerQuery,
+        variables: { customerId: `gid://shopify/Customer/${customerId}` },
+      },
+    });
+
+    const customerData = customerResponse.data?.data?.customer;
+    const customerEmail = customerData?.email;
+
+    if (!customerEmail) {
+      return res.status(404).json({
+        error: "Customer not found",
+        details: `No customer found with ID ${customerId}`,
+      });
+    }
+
+    let availableBuyers = [];
+    if (customerData?.metafield?.value) {
+      try {
+        availableBuyers = JSON.parse(customerData.metafield.value);
+      } catch (e) {
+        console.warn("Failed to parse buyers metafield:", e);
+      }
+    }
+
+    // ── 2. Fetch + parse the Excel file ────────────────────────────────────
+    const shopMetafieldQuery = `
+      query getShopMetafield {
+        shop {
+          metafield(namespace: "custom", key: "merchantperformance") {
+            id
+            value
+            type
+          }
+        }
+      }
+    `;
+
+    const shopifyResponse = await axios({
+      method: "POST",
+      url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+      },
+      data: { query: shopMetafieldQuery },
+    });
+
+    const metafieldData = shopifyResponse.data?.data?.shop?.metafield;
+    if (!metafieldData) {
+      return res.status(404).json({
+        error: "Excel file not found",
+        details: "No shop metafield found for merchant performance",
+      });
+    }
+
+    let fileUrl;
+    if (metafieldData.type === "file_reference") {
+      const fileQuery = `
+        query getFileUrl($fileId: ID!) {
+          node(id: $fileId) {
+            ... on GenericFile { url }
+            ... on MediaImage { image { url } }
+          }
+        }
+      `;
+      const fileResponse = await axios({
+        method: "POST",
+        url: `https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`,
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": SHOPIFY_ADMIN_TOKEN,
+        },
+        data: { query: fileQuery, variables: { fileId: metafieldData.value } },
+      });
+      fileUrl = fileResponse.data?.data?.node?.url || fileResponse.data?.data?.node?.image?.url;
+      if (!fileUrl) {
+        return res.status(404).json({ error: "File URL not found" });
+      }
+    } else {
+      fileUrl = metafieldData.value;
+    }
+
+    const fileResponse = await axios({ method: "GET", url: fileUrl, responseType: "arraybuffer" });
+
+    const XLSX = require("xlsx");
+    const workbook = XLSX.read(fileResponse.data, { type: "buffer" });
+    const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+    const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      blankrows: false,
+      raw: true,
+    });
+
+    if (jsonData.length === 0) {
+      return res.status(404).json({ error: "Empty file" });
+    }
+
+    const headers = jsonData[0].map(h => h?.toString().trim().replace(/\u00A0/g, " "));
+    const rows = jsonData.slice(1);
+
+    const cleanNumber = (val) => {
+      if (val === null || val === undefined || val === "") return 0;
+      if (typeof val === "number") return val;
+      if (typeof val === "string") {
+        const cleaned = val.trim().replace(/[$,\s]/g, "");
+        const num = parseFloat(cleaned);
+        return isNaN(num) ? 0 : num;
+      }
+      return 0;
+    };
+
+    const parsedData = rows.map((row) => {
+      const obj = {};
+      headers.forEach((header, index) => {
+        obj[header] = row[index] !== undefined ? row[index] : "";
+      });
+      return obj;
+    });
+
+    // ── 3. Admin detection ─────────────────────────────────────────────────
+    // Count unique non-Total buyers across entire sheet
+    const allBuyersInSheet = [...new Set(
+      parsedData
+        .map(r => r["Buyer"]?.toString().trim())
+        .filter(b => b && b.toUpperCase() !== "TOTAL")
+    )];
+    const totalBuyerCount = allBuyersInSheet.length;
+
+    // Find how many rows this customer has in the sheet
+    const myRows = parsedData.filter(
+      r => r["Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim()
+    );
+    const myNonTotalBuyers = [...new Set(
+      myRows
+        .map(r => r["Buyer"]?.toString().trim())
+        .filter(b => b && b.toUpperCase() !== "TOTAL")
+    )];
+
+    // Admin = has access to ALL buyers (or you can use a metafield flag instead)
+    const isAdmin = myNonTotalBuyers.length >= totalBuyerCount;
+
+    // ── 4. Resolve which merchant email to show data for ───────────────────
+    // For regular users: always their own email
+    // For admins: use ?merchant= param, or default to first non-admin merchant
+    let targetEmail = customerEmail;
+    let merchantList = [];
+
+    if (isAdmin) {
+      // Build merchant list: all unique emails EXCEPT admin emails
+      // An email is "admin" if it has access to all buyers
+      const emailBuyerCounts = {};
+      parsedData.forEach(row => {
+        const email = row["Email"]?.toString().toLowerCase().trim();
+        const b = row["Buyer"]?.toString().trim();
+        if (email && b && b.toUpperCase() !== "TOTAL") {
+          if (!emailBuyerCounts[email]) emailBuyerCounts[email] = new Set();
+          emailBuyerCounts[email].add(b.toUpperCase());
+        }
+      });
+
+      // Merchant list = emails that do NOT have all buyers (i.e. real merchants)
+      const merchantEmails = Object.entries(emailBuyerCounts)
+        .filter(([, buyerSet]) => buyerSet.size < totalBuyerCount)
+        .map(([email]) => email)
+        .sort();
+
+      // Get display names for each merchant email
+      merchantList = merchantEmails.map(email => {
+        const row = parsedData.find(
+          r => r["Email"]?.toString().toLowerCase().trim() === email
+        );
+        return {
+          email,
+          name: row?.["Name"]?.toString().trim() || email,
+        };
+      });
+
+      // Resolve target email
+      if (merchant && merchantEmails.includes(merchant.toLowerCase())) {
+        targetEmail = merchant.toLowerCase();
+      } else {
+        // Default to first merchant
+        targetEmail = merchantEmails[0] || customerEmail;
+      }
+    }
+
+    // ── 5. Filter rows for target merchant ────────────────────────────────
+    const customerRows = parsedData.filter(
+      r => r["Email"]?.toString().toLowerCase().trim() === targetEmail.toLowerCase().trim()
+    );
+
+    if (customerRows.length === 0) {
+      return res.status(404).json({
+        error: "Customer data not found",
+        details: `No performance data found for: ${targetEmail}`,
+      });
+    }
+
+    // ── 6. Buyer filtering (same logic as before) ─────────────────────────
+    const buyerColumn = customerRows.map(r => r["Buyer"]).filter(Boolean);
+    const isMultiBuyer = buyerColumn.length > 1;
+    const hasTotal = customerRows.some(r => {
+      const b = r["Buyer"]?.toString().trim().toUpperCase();
+      return b === "TOTAL" || b.includes("TOTAL");
+    });
+
+    let filteredRows = customerRows;
+    if (buyer && buyer !== "All") {
+      const normalizedBuyer = buyer.trim().toUpperCase();
+      filteredRows = customerRows.filter(
+        r => r["Buyer"]?.toString().trim().toUpperCase() === normalizedBuyer
+      );
+      if (filteredRows.length === 0) {
+        return res.status(404).json({
+          error: "Buyer data not found",
+          details: `No performance data found for buyer: ${buyer}`,
+        });
+      }
+    }
+
+    const isTotalSelected = buyer && buyer.trim().toUpperCase().includes("TOTAL");
+
+    // ── 7. Aggregation (unchanged from your original) ─────────────────────
+    const aggregateSummary = (rows) => {
+      const totals = {
+        volumeLY25: 0, targetFY26: 0, ytdFY26: 0, totalOpenPos: 0,
+        totalOrders: 0, otifValues: [], otifLYValues: [],
+        totalQualityClaimsLY: 0, totalQualityClaims: 0,
+        totalSKUs: 0, totalConvertedSKUs: 0, numberOfPos: 0,
+        openPosCount: 0, growth: 0, latePos: 0, onTimePos: 0,
+      };
+      rows.forEach(row => {
+        totals.volumeLY25 += cleanNumber(row["Volume LY25"]);
+        totals.targetFY26 += cleanNumber(row["Target FY26"]);
+        totals.ytdFY26 += cleanNumber(row["YTD FY26"]);
+        totals.totalOpenPos += cleanNumber(row["Open Pos"]);
+        totals.totalOrders += cleanNumber(row["Total orders"]);
+        const otif = cleanNumber(row["OTIF"]);
+        if (otif > 0) totals.otifValues.push(otif);
+        const otifLY = cleanNumber(row["OTIF LY"]);
+        if (otifLY > 0) totals.otifLYValues.push(otifLY);
+        totals.growth += cleanNumber(row["Growth"]);
+        totals.totalQualityClaimsLY += cleanNumber(row["Quality Claims LY"]);
+        totals.totalQualityClaims += cleanNumber(row["Quality Claims"]);
+        totals.totalSKUs += cleanNumber(row["Total SKUs"]);
+        totals.totalConvertedSKUs += cleanNumber(row["Converted SKUs"]);
+        totals.numberOfPos += cleanNumber(row["Number of Pos"]);
+        totals.openPosCount += cleanNumber(row["Open Pos count"]);
+        totals.latePos += cleanNumber(row["Late Pos"]);
+        totals.onTimePos += cleanNumber(row["Ontime Pos"]);
+      });
+      const avgOtif = totals.otifValues.length > 0
+        ? totals.otifValues.reduce((a, b) => a + b, 0) / totals.otifValues.length : 0;
+      const avgOtifLY = totals.otifLYValues.length > 0
+        ? totals.otifLYValues.reduce((a, b) => a + b, 0) / totals.otifLYValues.length : 0;
+      return {
+        totalRows: rows.length,
+        volumeLY25: totals.volumeLY25, targetFY26: totals.targetFY26,
+        ytdActual: totals.ytdFY26, ytdFY26: totals.ytdFY26,
+        totalOpenPos: totals.totalOpenPos, totalOrders: totals.totalOrders,
+        otifRate: `${avgOtif.toFixed(0)}%`, otifRawAverage: avgOtif, otifLY: avgOtifLY,
+        totalQualityClaimsLY: totals.totalQualityClaimsLY,
+        totalQualityClaims: totals.totalQualityClaims,
+        totalSKUs: totals.totalSKUs, totalConvertedSKUs: totals.totalConvertedSKUs,
+        numberOfPos: totals.numberOfPos, openPosCount: totals.openPosCount,
+        growth: totals.growth, ytdTarget: totals.targetFY26,
+        lytd: totals.volumeLY25, latePos: totals.latePos, onTimePos: totals.onTimePos,
+      };
+    };
+
+    const makeSummaryFromRow = (row) => ({
+      totalRows: 1,
+      volumeLY25: cleanNumber(row["Volume LY25"]),
+      targetFY26: cleanNumber(row["Target FY26"]),
+      ytdActual: cleanNumber(row["YTD FY26"]),
+      ytdFY26: cleanNumber(row["YTD FY26"]),
+      totalOpenPos: cleanNumber(row["Open Pos"]),
+      totalOrders: cleanNumber(row["Total orders"]),
+      otifRate: `${cleanNumber(row["OTIF"]).toFixed(0)}%`,
+      otifRawAverage: cleanNumber(row["OTIF"]),
+      otifLY: cleanNumber(row["OTIF LY"]),
+      totalQualityClaimsLY: cleanNumber(row["Quality Claims LY"]),
+      totalQualityClaims: cleanNumber(row["Quality Claims"]),
+      totalSKUs: cleanNumber(row["Total SKUs"]),
+      totalConvertedSKUs: cleanNumber(row["Converted SKUs"]),
+      numberOfPos: cleanNumber(row["Number of Pos"]),
+      openPosCount: cleanNumber(row["Open Pos count"]),
+      growth: cleanNumber(row["Growth"]),
+      ytdTarget: cleanNumber(row["Target FY26"]),
+      lytd: cleanNumber(row["Volume LY25"]),
+      latePos: cleanNumber(row["Late Pos"]),
+      onTimePos: cleanNumber(row["Ontime Pos"]),
+    });
+
+    // ── 8. Build summary ───────────────────────────────────────────────────
+    let summary;
+    let determinedCurrentBuyer;
+    const buyersList = Array.from(new Set(
+      customerRows.map(r => r["Buyer"]).filter(Boolean)
+    )).sort();
+
+    if (buyer && buyer !== "All") {
+      determinedCurrentBuyer = buyer;
+      summary = isTotalSelected && filteredRows.length > 0
+        ? makeSummaryFromRow(filteredRows[0])
+        : aggregateSummary(filteredRows);
+    } else {
+      // Default to Total if available, otherwise first non-total buyer
+      const totalBuyer = buyersList.find(b => b.trim().toUpperCase().includes("TOTAL"));
+      const nonTotalBuyers = buyersList.filter(b => !b.trim().toUpperCase().includes("TOTAL"));
+      determinedCurrentBuyer = totalBuyer || nonTotalBuyers[0] || buyersList[0] || "Unknown";
+
+      const normalizedDetermined = determinedCurrentBuyer.trim().toUpperCase();
+      filteredRows = customerRows.filter(
+        r => r["Buyer"]?.toString().trim().toUpperCase() === normalizedDetermined
+      );
+
+      const isTotal = normalizedDetermined.includes("TOTAL");
+      summary = isTotal && filteredRows.length > 0
+        ? makeSummaryFromRow(filteredRows[0])
+        : aggregateSummary(filteredRows);
+    }
+
+    // ── 9. Respond ─────────────────────────────────────────────────────────
+    res.json({
+      success: true,
+      data: {
+        headers,
+        rows: filteredRows,
+        summary,
+        rowCount: filteredRows.length,
+        isMultiBuyer,
+        hasTotal,
+        availableBuyers: buyersList,
+        currentBuyer: determinedCurrentBuyer,
+        metafieldBuyers: availableBuyers,
+        // ↓ NEW admin fields
+        isAdmin,
+        merchantList,           // [{ email, name }, ...]
+        currentMerchant: isAdmin ? targetEmail : null,
+      },
+    });
+
+  } catch (err) {
+    console.error("Error:", err.message);
+    if (err.response?.status === 404) {
+      return res.status(404).json({ error: "File not found" });
+    }
+    return res.status(500).json({
+      error: "Failed to fetch or parse Excel file",
+      details: err.message,
+    });
+  }
+});
+
 router.get("/customer/:customerId/merchants-performance", async (req, res) => {
   const { customerId } = req.params;
   const { buyer } = req.query; // Optional buyer filter
