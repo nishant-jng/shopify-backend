@@ -2386,17 +2386,40 @@ router.get("/buyer-details", async (req, res) => {
 });
 
 
-
 router.post('/delete-po/:poId', async (req, res) => {
   try {
-    const { poId } = req.params
-    const { deletedBy } = req.query
+    const { poId } = req.params;
+    const { shopifyCustomerId, reason } = req.body;
 
-    if (!poId || !deletedBy) {
+    if (!poId || !shopifyCustomerId) {
       return res.status(400).json({
-        error: 'poId and deletedBy required'
-      })
+        error: 'poId and shopifyCustomerId are required'
+      });
     }
+
+    /* =========================
+       RESOLVE MEMBER IDENTITY
+    ========================= */
+
+    const { data: member, error: memberError } = await supabase
+      .from('organization_members')
+      .select('id, full_name')
+      .eq('shopify_customer_id', shopifyCustomerId)
+      .maybeSingle();
+
+    if (memberError) throw memberError;
+
+    if (!member) {
+      return res.status(400).json({ error: 'Could not resolve member identity.' });
+    }
+
+    const deleteMeta = {
+      deleted: true,
+      deletedAt: new Date().toISOString(),
+      deletedById: member.id,
+      deletedByName: member.full_name,
+      reason: reason || null
+    };
 
     /* =========================
        FETCH PO + LINK DATA
@@ -2423,19 +2446,16 @@ router.post('/delete-po/:poId', async (req, res) => {
         )
       `)
       .eq('id', poId)
-      .is('deleted_at', null)
-      .maybeSingle()
+      .is('delete_meta', null)
+      .maybeSingle();
 
-    if (poError) throw poError
+    if (poError) throw poError;
     if (!po) {
-      return res.status(404).json({ error: 'PO not found' })
+      return res.status(404).json({ error: 'PO not found or already deleted.' });
     }
 
-    const buyerName =
-      po.buyer_supplier_links?.buyer?.display_name || 'Unknown Buyer'
-
-    const supplierName =
-      po.buyer_supplier_links?.supplier?.display_name || 'Unknown Supplier'
+    const buyerName    = po.buyer_supplier_links?.buyer?.display_name    || 'Unknown Buyer';
+    const supplierName = po.buyer_supplier_links?.supplier?.display_name || 'Unknown Supplier';
 
     /* =========================
        SOFT DELETE PO
@@ -2443,47 +2463,44 @@ router.post('/delete-po/:poId', async (req, res) => {
 
     const { error: deleteError } = await supabase
       .from('purchase_orders')
-      .update({
-        deleted_at: new Date().toISOString(),
-        deleted_by_name: deletedBy
-      })
-      .eq('id', poId)
+      .update({ delete_meta: deleteMeta })
+      .eq('id', poId);
 
-    if (deleteError) throw deleteError
+    if (deleteError) throw deleteError;
 
-    console.log('🗑️ PO soft deleted:', poId)
+    console.log('🗑️ PO soft deleted:', poId, 'by', member.full_name);
+
+    /* =========================
+       UPDATE ALERT SNAPSHOTS
+    ========================= */
 
     const { data: existingAlerts } = await supabase
-  .from('alerts')
-  .select('id, po_snapshot')
-  .eq('po_id', poId)
-
-// Update each alert with deleted flag
-if (existingAlerts && existingAlerts.length > 0) {
-  // Update alerts one by one to preserve individual snapshots
-  const updatePromises = existingAlerts.map(alert =>
-    supabase
       .from('alerts')
-      .update({
-        po_snapshot: {
-          ...alert.po_snapshot,
-          deleted: true,
-          deleted_by: deletedBy,
-          deleted_at: new Date().toISOString()
-        }
-      })
-      .eq('id', alert.id)
-  )
+      .select('id, po_snapshot')
+      .eq('po_id', poId);
 
-  const results = await Promise.all(updatePromises)
-  
-  const errors = results.filter(r => r.error)
-  if (errors.length > 0) {
-    console.error('❌ Alert update errors:', errors)
-  } else {
-    console.log('✅ Updated alerts with deleted flag:', existingAlerts.length)
-  }
-}
+    if (existingAlerts?.length > 0) {
+      const updatePromises = existingAlerts.map(alert =>
+        supabase
+          .from('alerts')
+          .update({
+            po_snapshot: {
+              ...(alert.po_snapshot || {}),  // ✅ guard against null snapshot
+              delete_meta: deleteMeta        // ✅ same object, guaranteed consistent
+            }
+          })
+          .eq('id', alert.id)
+      );
+
+      const results = await Promise.all(updatePromises);
+      const errors  = results.filter(r => r.error);
+
+      if (errors.length > 0) {
+        console.error('❌ Alert snapshot update errors:', errors);
+      } else {
+        console.log('✅ Updated alert snapshots:', existingAlerts.length);
+      }
+    }
 
     /* =========================
        FETCH MERCHANT MEMBERS
@@ -2493,7 +2510,7 @@ if (existingAlerts && existingAlerts.length > 0) {
       .from('organizations')
       .select('id')
       .eq('type', 'merchant')
-      .maybeSingle()
+      .maybeSingle();
 
     const { data: accessRows } = await supabase
       .from('member_organization_access')
@@ -2505,10 +2522,7 @@ if (existingAlerts && existingAlerts.length > 0) {
           organization_id
         )
       `)
-      .eq(
-        'organization_id',
-        po.buyer_supplier_links.buyer_org_id
-      )
+      .eq('organization_id', po.buyer_supplier_links.buyer_org_id);
 
     const eligibleMembers = (accessRows || [])
       .map(r => r.organization_members)
@@ -2516,35 +2530,31 @@ if (existingAlerts && existingAlerts.length > 0) {
         m &&
         merchantOrg &&
         m.organization_id === merchantOrg.id
-      )
+      );
 
     /* =========================
-       SEND EMAIL ONLY
+       SEND EMAIL
     ========================= */
 
     if (eligibleMembers.length > 0) {
-
-      const message =
-        `PO ${po.po_number} for ${buyerName} → ${supplierName} was deleted by ${deletedBy}`
+      const message = `PO ${po.po_number} for ${buyerName} → ${supplierName} was deleted by ${member.full_name}${reason ? `: ${reason}` : ' (no reason provided)'}`;
 
       sendAlertEmail(
         eligibleMembers.map(m => ({
           email: m.email,
-          name: m.full_name
+          name:  m.full_name
         })),
         message,
         {
-          buyer_name: buyerName,
-          supplier_name: supplierName,
-          po_number: po.po_number,
-          quantity_ordered: po.quantity_ordered,
-          amount: po.amount,
-          date: po.po_received_date
+          buyer_name:        buyerName,
+          supplier_name:     supplierName,
+          po_number:         po.po_number,
+          quantity_ordered:  po.quantity_ordered,
+          amount:            po.amount,
+          date:              po.po_received_date
         },
         'PO_DELETED'
-      ).catch(err =>
-        console.error('Delete email failed:', err)
-      )
+      ).catch(err => console.error('❌ Delete email failed:', err));
     }
 
     /* =========================
@@ -2553,17 +2563,16 @@ if (existingAlerts && existingAlerts.length > 0) {
 
     return res.json({
       success: true,
-      message: 'PO deleted successfully'
-    })
+      message: 'PO deleted successfully.'
+    });
 
   } catch (err) {
-    console.error('❌ Delete PO Error:', err)
-
+    console.error('❌ Delete PO Error:', err);
     return res.status(500).json({
-      error: err.message || 'Failed to delete PO'
-    })
+      error: err.message || 'Failed to delete PO.'
+    });
   }
-})
+});
 
 
 module.exports = router
