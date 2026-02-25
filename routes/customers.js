@@ -1312,7 +1312,7 @@ router.delete("/customer/:customerId",authenticate, async (req, res) => {
 
 router.get("/customer/:customerId/admin-merchant-performance", async (req, res) => {
   const { customerId } = req.params;
-  const { buyer, merchant } = req.query; // merchant = email filter for admins
+  const { buyer, merchant } = req.query;
 
   if (!customerId) {
     return res.status(400).json({
@@ -1465,7 +1465,6 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
     });
 
     // ── 3. Admin detection ─────────────────────────────────────────────────
-    // Count unique non-Total buyers across entire sheet
     const allBuyersInSheet = [...new Set(
       parsedData
         .map(r => r["Buyer"]?.toString().trim())
@@ -1473,7 +1472,6 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
     )];
     const totalBuyerCount = allBuyersInSheet.length;
 
-    // Find how many rows this customer has in the sheet
     const myRows = parsedData.filter(
       r => r["Email"]?.toString().toLowerCase().trim() === customerEmail.toLowerCase().trim()
     );
@@ -1483,18 +1481,15 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         .filter(b => b && b.toUpperCase() !== "TOTAL")
     )];
 
-    // Admin = has access to ALL buyers (or you can use a metafield flag instead)
     const isAdmin = myNonTotalBuyers.length >= totalBuyerCount;
 
     // ── 4. Resolve which merchant email to show data for ───────────────────
-    // For regular users: always their own email
-    // For admins: use ?merchant= param, or default to first non-admin merchant
-    let targetEmail = customerEmail;
+    let targetEmail = customerEmail; // default: logged-in user's own data
     let merchantList = [];
+    let isAllMerchants = false;      // true when admin selects "All Merchants"
 
     if (isAdmin) {
-      // Build merchant list: all unique emails EXCEPT admin emails
-      // An email is "admin" if it has access to all buyers
+      // Build merchant list: all unique emails that are NOT admins
       const emailBuyerCounts = {};
       parsedData.forEach(row => {
         const email = row["Email"]?.toString().toLowerCase().trim();
@@ -1505,13 +1500,11 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         }
       });
 
-      // Merchant list = emails that do NOT have all buyers (i.e. real merchants)
       const merchantEmails = Object.entries(emailBuyerCounts)
         .filter(([, buyerSet]) => buyerSet.size < totalBuyerCount)
         .map(([email]) => email)
         .sort();
 
-      // Get display names for each merchant email
       merchantList = merchantEmails.map(email => {
         const row = parsedData.find(
           r => r["Email"]?.toString().toLowerCase().trim() === email
@@ -1522,28 +1515,44 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         };
       });
 
-      // Resolve target email
-      if (merchant && merchantEmails.includes(merchant.toLowerCase())) {
-        targetEmail = merchant.toLowerCase();
+      // Resolve target:
+      // - no ?merchant= param OR empty string → All Merchants (combined view)
+      // - valid merchant email → that specific merchant
+      // - unrecognised value → fall back to All Merchants
+      if (merchant && merchant.trim() !== "" && merchantEmails.includes(merchant.toLowerCase().trim())) {
+        targetEmail = merchant.toLowerCase().trim();
+        isAllMerchants = false;
       } else {
-        // Default to first merchant
-        targetEmail = merchantEmails[0] || customerEmail;
+        // No merchant param or unrecognised → combined view across all merchants
+        targetEmail = null;
+        isAllMerchants = true;
       }
     }
 
-    // ── 5. Filter rows for target merchant ────────────────────────────────
-    const customerRows = parsedData.filter(
-      r => r["Email"]?.toString().toLowerCase().trim() === targetEmail.toLowerCase().trim()
-    );
+    // ── 5. Filter rows for target ──────────────────────────────────────────
+    let customerRows;
+
+    if (isAdmin && isAllMerchants) {
+      // Aggregate across ALL merchants (every row in the sheet)
+      customerRows = parsedData.filter(r => {
+        const email = r["Email"]?.toString().toLowerCase().trim();
+        // Include only merchant rows (exclude admin's own rows if they exist separately)
+        return email && email.length > 0;
+      });
+    } else {
+      customerRows = parsedData.filter(
+        r => r["Email"]?.toString().toLowerCase().trim() === targetEmail.toLowerCase().trim()
+      );
+    }
 
     if (customerRows.length === 0) {
       return res.status(404).json({
         error: "Customer data not found",
-        details: `No performance data found for: ${targetEmail}`,
+        details: `No performance data found for: ${isAllMerchants ? "all merchants" : targetEmail}`,
       });
     }
 
-    // ── 6. Buyer filtering (same logic as before) ─────────────────────────
+    // ── 6. Buyer filtering ─────────────────────────────────────────────────
     const buyerColumn = customerRows.map(r => r["Buyer"]).filter(Boolean);
     const isMultiBuyer = buyerColumn.length > 1;
     const hasTotal = customerRows.some(r => {
@@ -1567,7 +1576,7 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
 
     const isTotalSelected = buyer && buyer.trim().toUpperCase().includes("TOTAL");
 
-    // ── 7. Aggregation (unchanged from your original) ─────────────────────
+    // ── 7. Aggregation helpers ─────────────────────────────────────────────
     const aggregateSummary = (rows) => {
       const totals = {
         volumeLY25: 0, targetFY26: 0, ytdFY26: 0, totalOpenPos: 0,
@@ -1577,41 +1586,51 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         openPosCount: 0, growth: 0, latePos: 0, onTimePos: 0,
       };
       rows.forEach(row => {
-        totals.volumeLY25 += cleanNumber(row["Volume LY25"]);
-        totals.targetFY26 += cleanNumber(row["Target FY26"]);
-        totals.ytdFY26 += cleanNumber(row["YTD FY26"]);
-        totals.totalOpenPos += cleanNumber(row["Open Pos"]);
-        totals.totalOrders += cleanNumber(row["Total orders"]);
+        totals.volumeLY25           += cleanNumber(row["Volume LY25"]);
+        totals.targetFY26           += cleanNumber(row["Target FY26"]);
+        totals.ytdFY26              += cleanNumber(row["YTD FY26"]);
+        totals.totalOpenPos         += cleanNumber(row["Open Pos"]);
+        totals.totalOrders          += cleanNumber(row["Total orders"]);
         const otif = cleanNumber(row["OTIF"]);
         if (otif > 0) totals.otifValues.push(otif);
         const otifLY = cleanNumber(row["OTIF LY"]);
         if (otifLY > 0) totals.otifLYValues.push(otifLY);
-        totals.growth += cleanNumber(row["Growth"]);
+        totals.growth               += cleanNumber(row["Growth"]);
         totals.totalQualityClaimsLY += cleanNumber(row["Quality Claims LY"]);
-        totals.totalQualityClaims += cleanNumber(row["Quality Claims"]);
-        totals.totalSKUs += cleanNumber(row["Total SKUs"]);
-        totals.totalConvertedSKUs += cleanNumber(row["Converted SKUs"]);
-        totals.numberOfPos += cleanNumber(row["Number of Pos"]);
-        totals.openPosCount += cleanNumber(row["Open Pos count"]);
-        totals.latePos += cleanNumber(row["Late Pos"]);
-        totals.onTimePos += cleanNumber(row["Ontime Pos"]);
+        totals.totalQualityClaims   += cleanNumber(row["Quality Claims"]);
+        totals.totalSKUs            += cleanNumber(row["Total SKUs"]);
+        totals.totalConvertedSKUs   += cleanNumber(row["Converted SKUs"]);
+        totals.numberOfPos          += cleanNumber(row["Number of Pos"]);
+        totals.openPosCount         += cleanNumber(row["Open Pos count"]);
+        totals.latePos              += cleanNumber(row["Late Pos"]);
+        totals.onTimePos            += cleanNumber(row["Ontime Pos"]);
       });
-      const avgOtif = totals.otifValues.length > 0
+      const avgOtif   = totals.otifValues.length > 0
         ? totals.otifValues.reduce((a, b) => a + b, 0) / totals.otifValues.length : 0;
       const avgOtifLY = totals.otifLYValues.length > 0
         ? totals.otifLYValues.reduce((a, b) => a + b, 0) / totals.otifLYValues.length : 0;
       return {
         totalRows: rows.length,
-        volumeLY25: totals.volumeLY25, targetFY26: totals.targetFY26,
-        ytdActual: totals.ytdFY26, ytdFY26: totals.ytdFY26,
-        totalOpenPos: totals.totalOpenPos, totalOrders: totals.totalOrders,
-        otifRate: `${avgOtif.toFixed(0)}%`, otifRawAverage: avgOtif, otifLY: avgOtifLY,
+        volumeLY25: totals.volumeLY25,
+        targetFY26: totals.targetFY26,
+        ytdActual: totals.ytdFY26,
+        ytdFY26: totals.ytdFY26,
+        totalOpenPos: totals.totalOpenPos,
+        totalOrders: totals.totalOrders,
+        otifRate: `${avgOtif.toFixed(0)}%`,
+        otifRawAverage: avgOtif,
+        otifLY: avgOtifLY,
         totalQualityClaimsLY: totals.totalQualityClaimsLY,
         totalQualityClaims: totals.totalQualityClaims,
-        totalSKUs: totals.totalSKUs, totalConvertedSKUs: totals.totalConvertedSKUs,
-        numberOfPos: totals.numberOfPos, openPosCount: totals.openPosCount,
-        growth: totals.growth, ytdTarget: totals.targetFY26,
-        lytd: totals.volumeLY25, latePos: totals.latePos, onTimePos: totals.onTimePos,
+        totalSKUs: totals.totalSKUs,
+        totalConvertedSKUs: totals.totalConvertedSKUs,
+        numberOfPos: totals.numberOfPos,
+        openPosCount: totals.openPosCount,
+        growth: totals.growth,
+        ytdTarget: totals.targetFY26,
+        lytd: totals.volumeLY25,
+        latePos: totals.latePos,
+        onTimePos: totals.onTimePos,
       };
     };
 
@@ -1642,9 +1661,17 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
     // ── 8. Build summary ───────────────────────────────────────────────────
     let summary;
     let determinedCurrentBuyer;
-    const buyersList = Array.from(new Set(
-      customerRows.map(r => r["Buyer"]).filter(Boolean)
-    )).sort();
+
+    // For "All Merchants" view, collect buyers across all merchant rows
+    const buyersList = isAllMerchants
+      ? Array.from(new Set(
+          customerRows
+            .map(r => r["Buyer"])
+            .filter(Boolean)
+        )).sort()
+      : Array.from(new Set(
+          customerRows.map(r => r["Buyer"]).filter(Boolean)
+        )).sort();
 
     if (buyer && buyer !== "All") {
       determinedCurrentBuyer = buyer;
@@ -1652,20 +1679,30 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         ? makeSummaryFromRow(filteredRows[0])
         : aggregateSummary(filteredRows);
     } else {
-      // Default to Total if available, otherwise first non-total buyer
-      const totalBuyer = buyersList.find(b => b.trim().toUpperCase().includes("TOTAL"));
-      const nonTotalBuyers = buyersList.filter(b => !b.trim().toUpperCase().includes("TOTAL"));
-      determinedCurrentBuyer = totalBuyer || nonTotalBuyers[0] || buyersList[0] || "Unknown";
+      if (isAllMerchants) {
+        // For combined view: aggregate all TOTAL rows (one per merchant),
+        // or if no TOTAL rows exist, aggregate everything
+        const totalRows = customerRows.filter(
+          r => r["Buyer"]?.toString().trim().toUpperCase().includes("TOTAL")
+        );
+        filteredRows = totalRows.length > 0 ? totalRows : customerRows;
+        determinedCurrentBuyer = "Total";
+        summary = aggregateSummary(filteredRows);
+      } else {
+        const totalBuyer = buyersList.find(b => b.trim().toUpperCase().includes("TOTAL"));
+        const nonTotalBuyers = buyersList.filter(b => !b.trim().toUpperCase().includes("TOTAL"));
+        determinedCurrentBuyer = totalBuyer || nonTotalBuyers[0] || buyersList[0] || "Unknown";
 
-      const normalizedDetermined = determinedCurrentBuyer.trim().toUpperCase();
-      filteredRows = customerRows.filter(
-        r => r["Buyer"]?.toString().trim().toUpperCase() === normalizedDetermined
-      );
+        const normalizedDetermined = determinedCurrentBuyer.trim().toUpperCase();
+        filteredRows = customerRows.filter(
+          r => r["Buyer"]?.toString().trim().toUpperCase() === normalizedDetermined
+        );
 
-      const isTotal = normalizedDetermined.includes("TOTAL");
-      summary = isTotal && filteredRows.length > 0
-        ? makeSummaryFromRow(filteredRows[0])
-        : aggregateSummary(filteredRows);
+        const isTotal = normalizedDetermined.includes("TOTAL");
+        summary = isTotal && filteredRows.length > 0
+          ? makeSummaryFromRow(filteredRows[0])
+          : aggregateSummary(filteredRows);
+      }
     }
 
     // ── 9. Respond ─────────────────────────────────────────────────────────
@@ -1681,10 +1718,9 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         availableBuyers: buyersList,
         currentBuyer: determinedCurrentBuyer,
         metafieldBuyers: availableBuyers,
-        // ↓ NEW admin fields
         isAdmin,
-        merchantList,           // [{ email, name }, ...]
-        currentMerchant: isAdmin ? targetEmail : null,
+        merchantList,
+        currentMerchant: isAdmin ? (targetEmail || null) : null, // null = All Merchants
       },
     });
 
