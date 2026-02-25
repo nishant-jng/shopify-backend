@@ -1484,12 +1484,11 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
     const isAdmin = myNonTotalBuyers.length >= totalBuyerCount;
 
     // ── 4. Resolve which merchant email to show data for ───────────────────
-    let targetEmail = customerEmail; // default: logged-in user's own data
+    let targetEmail = customerEmail;
     let merchantList = [];
-    let isAllMerchants = false;      // true when admin selects "All Merchants"
 
     if (isAdmin) {
-      // Build merchant list: all unique emails that are NOT admins
+      // Build merchant list: emails that are NOT admins
       const emailBuyerCounts = {};
       parsedData.forEach(row => {
         const email = row["Email"]?.toString().toLowerCase().trim();
@@ -1515,40 +1514,26 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         };
       });
 
-      // Resolve target:
-      // - no ?merchant= param OR empty string → All Merchants (combined view)
-      // - valid merchant email → that specific merchant
-      // - unrecognised value → fall back to All Merchants
       if (merchant && merchant.trim() !== "" && merchantEmails.includes(merchant.toLowerCase().trim())) {
+        // Specific merchant selected — show their data
         targetEmail = merchant.toLowerCase().trim();
-        isAllMerchants = false;
       } else {
-        // No merchant param or unrecognised → combined view across all merchants
-        targetEmail = null;
-        isAllMerchants = true;
+        // No merchant param or empty string — fall back to admin's own rows.
+        // The admin has a TOTAL row in the sheet which is the pre-calculated
+        // combined figure for all merchants. Use that as the "All" view.
+        targetEmail = customerEmail;
       }
     }
 
     // ── 5. Filter rows for target ──────────────────────────────────────────
-    let customerRows;
-
-    if (isAdmin && isAllMerchants) {
-      // Aggregate across ALL merchants (every row in the sheet)
-      customerRows = parsedData.filter(r => {
-        const email = r["Email"]?.toString().toLowerCase().trim();
-        // Include only merchant rows (exclude admin's own rows if they exist separately)
-        return email && email.length > 0;
-      });
-    } else {
-      customerRows = parsedData.filter(
-        r => r["Email"]?.toString().toLowerCase().trim() === targetEmail.toLowerCase().trim()
-      );
-    }
+    const customerRows = parsedData.filter(
+      r => r["Email"]?.toString().toLowerCase().trim() === targetEmail.toLowerCase().trim()
+    );
 
     if (customerRows.length === 0) {
       return res.status(404).json({
         error: "Customer data not found",
-        details: `No performance data found for: ${isAllMerchants ? "all merchants" : targetEmail}`,
+        details: `No performance data found for: ${targetEmail}`,
       });
     }
 
@@ -1661,17 +1646,9 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
     // ── 8. Build summary ───────────────────────────────────────────────────
     let summary;
     let determinedCurrentBuyer;
-
-    // For "All Merchants" view, collect buyers across all merchant rows
-    const buyersList = isAllMerchants
-      ? Array.from(new Set(
-          customerRows
-            .map(r => r["Buyer"])
-            .filter(Boolean)
-        )).sort()
-      : Array.from(new Set(
-          customerRows.map(r => r["Buyer"]).filter(Boolean)
-        )).sort();
+    const buyersList = Array.from(new Set(
+      customerRows.map(r => r["Buyer"]).filter(Boolean)
+    )).sort();
 
     if (buyer && buyer !== "All") {
       determinedCurrentBuyer = buyer;
@@ -1679,30 +1656,19 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         ? makeSummaryFromRow(filteredRows[0])
         : aggregateSummary(filteredRows);
     } else {
-      if (isAllMerchants) {
-        // For combined view: aggregate all TOTAL rows (one per merchant),
-        // or if no TOTAL rows exist, aggregate everything
-        const totalRows = customerRows.filter(
-          r => r["Buyer"]?.toString().trim().toUpperCase().includes("TOTAL")
-        );
-        filteredRows = totalRows.length > 0 ? totalRows : customerRows;
-        determinedCurrentBuyer = "Total";
-        summary = aggregateSummary(filteredRows);
-      } else {
-        const totalBuyer = buyersList.find(b => b.trim().toUpperCase().includes("TOTAL"));
-        const nonTotalBuyers = buyersList.filter(b => !b.trim().toUpperCase().includes("TOTAL"));
-        determinedCurrentBuyer = totalBuyer || nonTotalBuyers[0] || buyersList[0] || "Unknown";
+      const totalBuyer = buyersList.find(b => b.trim().toUpperCase().includes("TOTAL"));
+      const nonTotalBuyers = buyersList.filter(b => !b.trim().toUpperCase().includes("TOTAL"));
+      determinedCurrentBuyer = totalBuyer || nonTotalBuyers[0] || buyersList[0] || "Unknown";
 
-        const normalizedDetermined = determinedCurrentBuyer.trim().toUpperCase();
-        filteredRows = customerRows.filter(
-          r => r["Buyer"]?.toString().trim().toUpperCase() === normalizedDetermined
-        );
+      const normalizedDetermined = determinedCurrentBuyer.trim().toUpperCase();
+      filteredRows = customerRows.filter(
+        r => r["Buyer"]?.toString().trim().toUpperCase() === normalizedDetermined
+      );
 
-        const isTotal = normalizedDetermined.includes("TOTAL");
-        summary = isTotal && filteredRows.length > 0
-          ? makeSummaryFromRow(filteredRows[0])
-          : aggregateSummary(filteredRows);
-      }
+      const isTotal = normalizedDetermined.includes("TOTAL");
+      summary = isTotal && filteredRows.length > 0
+        ? makeSummaryFromRow(filteredRows[0])
+        : aggregateSummary(filteredRows);
     }
 
     // ── 9. Respond ─────────────────────────────────────────────────────────
@@ -1720,7 +1686,11 @@ router.get("/customer/:customerId/admin-merchant-performance", async (req, res) 
         metafieldBuyers: availableBuyers,
         isAdmin,
         merchantList,
-        currentMerchant: isAdmin ? (targetEmail || null) : null, // null = All Merchants
+        // null = admin viewing their own TOTAL row (All Merchants)
+        // email string = admin viewing a specific merchant
+        currentMerchant: isAdmin
+          ? (targetEmail === customerEmail ? null : targetEmail)
+          : null,
       },
     });
 
