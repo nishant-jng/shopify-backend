@@ -72,6 +72,32 @@ router.post('/upload-buyer-po', upload.single('poFile'), async (req, res) => {
     console.log('✅ Buyer-Supplier link found:', buyerSupplierLinkId)
 
     /* =========================
+   DUPLICATE PO CHECK
+========================= */
+
+const { data: existingPO, error: duplicateCheckError } = await supabase
+  .from('purchase_orders')
+  .select('id')
+  .eq('buyer_supplier_link_id', buyerSupplierLinkId)
+  .eq('po_number', poId)
+  .is('deleted_at', null)
+  .is('delete_meta', null)
+  .maybeSingle()
+
+if (duplicateCheckError) {
+  console.error('❌ Duplicate PO check error:', duplicateCheckError)
+  throw duplicateCheckError
+}
+
+if (existingPO) {
+  return res.status(409).json({
+    error: `PO number "${poId}" already exists for this buyer–supplier relationship`,
+  })
+}
+
+console.log('✅ No duplicate PO found, proceeding...')
+
+    /* =========================
        DATE HELPERS
     ========================= */
 
@@ -2047,7 +2073,6 @@ router.get('/my-pos', async (req, res) => {
 router.get('/my-buyer-pos', async (req, res) => {
   try {
     const { shopifyCustomerId } = req.query
-
     if (!shopifyCustomerId) {
       return res.status(400).json({
         error: 'shopifyCustomerId required'
@@ -2057,7 +2082,6 @@ router.get('/my-buyer-pos', async (req, res) => {
     /* =========================
        RESOLVE MEMBER + ACCESS
     ========================= */
-
     const { data: member, error: memberError } = await supabase
       .from('organization_members')
       .select(`
@@ -2068,7 +2092,6 @@ router.get('/my-buyer-pos', async (req, res) => {
       .maybeSingle()
 
     if (memberError) throw memberError
-
     if (!member || !member.member_organization_access?.length) {
       return res.json({ success: true, pos: [], count: 0 })
     }
@@ -2079,9 +2102,7 @@ router.get('/my-buyer-pos', async (req, res) => {
 
     /* =========================
        FETCH BUYER ORG NAMES
-       (needed for legacy POs)
     ========================= */
-
     const { data: buyerOrgs } = await supabase
       .from('organizations')
       .select('id, display_name')
@@ -2092,7 +2113,6 @@ router.get('/my-buyer-pos', async (req, res) => {
     /* =========================
        NEW POs (RELATIONSHIP BASED)
     ========================= */
-
     const { data: newPOs, error: newPoError } = await supabase
       .from('purchase_orders')
       .select(`
@@ -2107,7 +2127,10 @@ router.get('/my-buyer-pos', async (req, res) => {
           )
         )
       `)
-      .is('deleted_at', null) // ✅ exclude deleted POs
+      .is('deleted_at', null)
+      .is('delete_meta', null)
+      .neq('status', 'closed')
+      .gte('po_received_date', '2026-01-01')
       .in('buyer_supplier_links.buyer_org_id', buyerOrgIds)
       .order('created_at', { ascending: false })
 
@@ -2116,12 +2139,13 @@ router.get('/my-buyer-pos', async (req, res) => {
     /* =========================
        LEGACY POs (STRING BASED)
     ========================= */
-
     const { data: legacyPOs, error: legacyError } = await supabase
       .from('purchase_orders')
       .select('*')
-      .is('deleted_at', null) // ✅ exclude deleted POs
+      .is('deleted_at', null)
+      .is('delete_meta', null)
       .is('buyer_supplier_link_id', null)
+      .gte('po_received_date', '2026-01-01')
       .in('buyer_name', buyerNames)
       .order('created_at', { ascending: false })
 
@@ -2130,13 +2154,10 @@ router.get('/my-buyer-pos', async (req, res) => {
     /* =========================
        NORMALIZE RESPONSE
     ========================= */
-
     const normalizedNew = newPOs.map(po => ({
       ...po,
-      buyer_name:
-        po.buyer_supplier_links?.buyer?.display_name || null,
-      supplier_name:
-        po.buyer_supplier_links?.supplier?.display_name || null,
+      buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
+      supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
       _source: 'relational'
     }))
 
@@ -2163,7 +2184,6 @@ router.get('/my-buyer-pos', async (req, res) => {
     })
   }
 })
-
 
 
 
