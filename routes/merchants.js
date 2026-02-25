@@ -1732,11 +1732,9 @@ router.get('/alerts', async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch alerts' })
   }
 })
-
 router.get('/my-alerts', async (req, res) => {
   try {
     const { shopifyCustomerId } = req.query
-
     if (!shopifyCustomerId) {
       return res.status(400).json({
         error: 'shopifyCustomerId required'
@@ -1746,7 +1744,6 @@ router.get('/my-alerts', async (req, res) => {
     /* =========================
        RESOLVE MEMBER (IF EXISTS)
     ========================= */
-
     const { data: member } = await supabase
       .from('organization_members')
       .select('id')
@@ -1754,17 +1751,13 @@ router.get('/my-alerts', async (req, res) => {
       .maybeSingle()
 
     const recipientIds = [shopifyCustomerId]
-
-    // If mapped, include new-style alerts
     if (member?.id) {
       recipientIds.push(member.id)
     }
 
     /* =========================
-       FETCH ALERTS (OLD + NEW)
-       Include BOTH po_snapshot and purchase_orders join
+       FETCH ALERTS
     ========================= */
-
     const { data: alerts, error } = await supabase
       .from('alerts')
       .select(`
@@ -1778,12 +1771,10 @@ router.get('/my-alerts', async (req, res) => {
           id,
           po_received_date,
           po_file_url,
-          quantity_ordered,
-          amount,
-          pi_received_date,
-          pi_file_url,
           po_number,
           pi_confirmed,
+          pi_received_date,
+          pi_file_url,
           created_by,
           buyer_supplier_links (
             buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
@@ -1803,58 +1794,67 @@ router.get('/my-alerts', async (req, res) => {
 
     /* =========================
        HYBRID APPROACH: Merge snapshot + live data
-       Priority: po_snapshot > purchase_orders join
     ========================= */
-
     const enrichedAlerts = (alerts || []).map(alert => {
-      // If we have a snapshot, use it as base
+      // If we have a snapshot, use it as the source of truth
       if (alert.po_snapshot) {
-        // Snapshot exists - it contains the state at time of alert
-        // For deleted/updated POs, this is the source of truth
+        if (alert.po_snapshot.delete_meta) {
+          return {
+            ...alert,
+            po_snapshot: {
+              ...alert.po_snapshot,
+              deleted: alert.po_snapshot.delete_meta.deleted || false,
+              deleted_at: alert.po_snapshot.delete_meta.deletedAt || null,
+              deleted_by: alert.po_snapshot.delete_meta.deletedByName || null,
+              deleted_by_id: alert.po_snapshot.delete_meta.deletedById || null,
+              reason: alert.po_snapshot.delete_meta.reason || null,
+            },
+            purchase_orders: alert.purchase_orders
+          }
+        }
+
         return {
           ...alert,
-          // Keep snapshot as-is (it has deleted, last_updated_at, etc)
           po_snapshot: alert.po_snapshot,
-          // Keep joined data for fallback
           purchase_orders: alert.purchase_orders
         }
-      } 
-      
-      // No snapshot - create one from live purchase_orders data (backward compatibility)
+      }
+
+      // No snapshot — build synthetic one from live purchase_orders (backward compat)
       if (alert.purchase_orders) {
         const po = alert.purchase_orders
-        
-        // Build snapshot from live data
+
         const syntheticSnapshot = {
           po_id: po.id,
           po_number: po.po_number,
           buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
           supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
           po_received_date: po.po_received_date,
-          quantity_ordered: po.quantity_ordered,
-          amount: po.amount,
-          currency: po.currency || 'USD',
+          quantity_ordered: null,  // removed from join to avoid PostgREST alias conflict
+          amount: null,            // removed from join to avoid PostgREST alias conflict
+          currency: 'USD',
           pi_confirmed: po.pi_confirmed || false,
           pi_received_date: po.pi_received_date,
           po_file_url: po.po_file_url,
           pi_file_url: po.pi_file_url,
-          // Old alerts don't have these fields
           deleted: false,
           deleted_at: null,
           deleted_by: null,
+          deleted_by_id: null,
+          reason: null,
           last_updated_at: null,
           last_updated_by: null,
           changes: null
         }
-        
+
         return {
           ...alert,
           po_snapshot: syntheticSnapshot,
           purchase_orders: alert.purchase_orders
         }
       }
-      
-      // No snapshot, no PO data - return as-is
+
+      // No snapshot, no PO data
       return alert
     })
 
@@ -1870,6 +1870,144 @@ router.get('/my-alerts', async (req, res) => {
     })
   }
 })
+
+// router.get('/my-alerts', async (req, res) => {
+//   try {
+//     const { shopifyCustomerId } = req.query
+
+//     if (!shopifyCustomerId) {
+//       return res.status(400).json({
+//         error: 'shopifyCustomerId required'
+//       })
+//     }
+
+//     /* =========================
+//        RESOLVE MEMBER (IF EXISTS)
+//     ========================= */
+
+//     const { data: member } = await supabase
+//       .from('organization_members')
+//       .select('id')
+//       .eq('shopify_customer_id', shopifyCustomerId)
+//       .maybeSingle()
+
+//     const recipientIds = [shopifyCustomerId]
+
+//     // If mapped, include new-style alerts
+//     if (member?.id) {
+//       recipientIds.push(member.id)
+//     }
+
+//     /* =========================
+//        FETCH ALERTS (OLD + NEW)
+//        Include BOTH po_snapshot and purchase_orders join
+//     ========================= */
+
+//     const { data: alerts, error } = await supabase
+//       .from('alerts')
+//       .select(`
+//         id,
+//         message,
+//         is_read,
+//         created_at,
+//         po_snapshot,
+//         alert_type,
+//         purchase_orders (
+//           id,
+//           po_received_date,
+//           po_file_url,
+//           quantity_ordered,
+//           amount,
+//           pi_received_date,
+//           pi_file_url,
+//           po_number,
+//           pi_confirmed,
+//           created_by,
+//           buyer_supplier_links (
+//             buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
+//               display_name
+//             ),
+//             supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
+//               display_name
+//             )
+//           )
+//         )
+//       `)
+//       .in('recipient_user_id', recipientIds)
+//       .order('created_at', { ascending: false })
+//       .limit(300)
+
+//     if (error) throw error
+
+//     /* =========================
+//        HYBRID APPROACH: Merge snapshot + live data
+//        Priority: po_snapshot > purchase_orders join
+//     ========================= */
+
+//     const enrichedAlerts = (alerts || []).map(alert => {
+//       // If we have a snapshot, use it as base
+//       if (alert.po_snapshot) {
+//         // Snapshot exists - it contains the state at time of alert
+//         // For deleted/updated POs, this is the source of truth
+//         return {
+//           ...alert,
+//           // Keep snapshot as-is (it has deleted, last_updated_at, etc)
+//           po_snapshot: alert.po_snapshot,
+//           // Keep joined data for fallback
+//           purchase_orders: alert.purchase_orders
+//         }
+//       } 
+      
+//       // No snapshot - create one from live purchase_orders data (backward compatibility)
+//       if (alert.purchase_orders) {
+//         const po = alert.purchase_orders
+        
+//         // Build snapshot from live data
+//         const syntheticSnapshot = {
+//           po_id: po.id,
+//           po_number: po.po_number,
+//           buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
+//           supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
+//           po_received_date: po.po_received_date,
+//           quantity_ordered: po.quantity_ordered,
+//           amount: po.amount,
+//           currency: po.currency || 'USD',
+//           pi_confirmed: po.pi_confirmed || false,
+//           pi_received_date: po.pi_received_date,
+//           po_file_url: po.po_file_url,
+//           pi_file_url: po.pi_file_url,
+//           // Old alerts don't have these fields
+//           deleted: false,
+//           deleted_at: null,
+//           deleted_by: null,
+//           last_updated_at: null,
+//           last_updated_by: null,
+//           changes: null
+//         }
+        
+//         return {
+//           ...alert,
+//           po_snapshot: syntheticSnapshot,
+//           purchase_orders: alert.purchase_orders
+//         }
+//       }
+      
+//       // No snapshot, no PO data - return as-is
+//       return alert
+//     })
+
+//     return res.json({
+//       success: true,
+//       alerts: enrichedAlerts
+//     })
+
+//   } catch (err) {
+//     console.error('Error fetching alerts:', err)
+//     res.status(500).json({
+//       error: 'Failed to fetch alerts'
+//     })
+//   }
+// })
 
 router.get('/my-pos', async (req, res) => {
   try {
