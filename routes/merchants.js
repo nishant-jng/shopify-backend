@@ -2074,9 +2074,7 @@ router.get('/my-buyer-pos', async (req, res) => {
   try {
     const { shopifyCustomerId } = req.query
     if (!shopifyCustomerId) {
-      return res.status(400).json({
-        error: 'shopifyCustomerId required'
-      })
+      return res.status(400).json({ error: 'shopifyCustomerId required' })
     }
 
     /* =========================
@@ -2084,10 +2082,7 @@ router.get('/my-buyer-pos', async (req, res) => {
     ========================= */
     const { data: member, error: memberError } = await supabase
       .from('organization_members')
-      .select(`
-        id,
-        member_organization_access ( organization_id )
-      `)
+      .select('id, member_organization_access ( organization_id )')
       .eq('shopify_customer_id', shopifyCustomerId)
       .maybeSingle()
 
@@ -2096,95 +2091,90 @@ router.get('/my-buyer-pos', async (req, res) => {
       return res.json({ success: true, pos: [], count: 0 })
     }
 
-    const buyerOrgIds = member.member_organization_access.map(
-      a => a.organization_id
-    )
+    const buyerOrgIds = member.member_organization_access.map(a => a.organization_id)
 
     /* =========================
-       FETCH BUYER ORG NAMES
+       GET LINK IDs + BUYER NAMES
+       (parallel, single round-trip)
     ========================= */
-    const { data: buyerOrgs } = await supabase
-      .from('organizations')
-      .select('id, display_name')
-      .in('id', buyerOrgIds)
+    const [{ data: links }, { data: buyerOrgs }] = await Promise.all([
+      supabase
+        .from('buyer_supplier_links')
+        .select('id')
+        .in('buyer_org_id', buyerOrgIds),
+      supabase
+        .from('organizations')
+        .select('display_name')
+        .in('id', buyerOrgIds)
+    ])
 
+    const linkIds    = links.map(l => l.id)
     const buyerNames = buyerOrgs.map(o => o.display_name)
 
     /* =========================
-       NEW POs (RELATIONSHIP BASED)
+       FETCH POs (PARALLEL)
     ========================= */
-    const { data: newPOs, error: newPoError } = await supabase
-      .from('purchase_orders')
-      .select(`
-        *,
-        buyer_supplier_links!inner (
-          buyer_org_id,
-          buyer:organizations!buyer_supplier_links_buyer_org_id_fkey (
-            display_name
-          ),
-          supplier:organizations!buyer_supplier_links_supplier_org_id_fkey (
-            display_name
+    const [
+      { data: newPOs,    error: newPoError },
+      { data: legacyPOs, error: legacyError }
+    ] = await Promise.all([
+
+      // Relational POs — filtered directly by link ID
+      supabase
+        .from('purchase_orders')
+        .select(`
+          *,
+          buyer_supplier_links (
+            buyer:organizations!buyer_supplier_links_buyer_org_id_fkey ( display_name ),
+            supplier:organizations!buyer_supplier_links_supplier_org_id_fkey ( display_name )
           )
-        )
-      `)
-      .is('deleted_at', null)
-      .is('delete_meta', null)
-      .neq('status', 'closed')
-      .gte('po_received_date', '2026-01-01')
-      .in('buyer_supplier_links.buyer_org_id', buyerOrgIds)
-      .order('created_at', { ascending: false })
+        `)
+        .is('deleted_at', null)
+        .is('delete_meta', null)
+        .neq('status', 'closed')
+        .gte('po_received_date', '2026-01-01')
+        .in('buyer_supplier_link_id', linkIds)
+        .order('created_at', { ascending: false }),
+
+      // Legacy POs — no link ID, matched by buyer name string
+      supabase
+        .from('purchase_orders')
+        .select('*')
+        .is('deleted_at', null)
+        .is('delete_meta', null)
+        .is('buyer_supplier_link_id', null)
+        .gte('po_received_date', '2026-01-01')
+        .in('buyer_name', buyerNames)
+        .order('created_at', { ascending: false })
+    ])
 
     if (newPoError) throw newPoError
-
-    /* =========================
-       LEGACY POs (STRING BASED)
-    ========================= */
-    const { data: legacyPOs, error: legacyError } = await supabase
-      .from('purchase_orders')
-      .select('*')
-      .is('deleted_at', null)
-      .is('delete_meta', null)
-      .is('buyer_supplier_link_id', null)
-      .gte('po_received_date', '2026-01-01')
-      .in('buyer_name', buyerNames)
-      .order('created_at', { ascending: false })
-
     if (legacyError) throw legacyError
 
     /* =========================
-       NORMALIZE RESPONSE
+       NORMALIZE + MERGE
     ========================= */
-    const normalizedNew = newPOs.map(po => ({
-      ...po,
-      buyer_name: po.buyer_supplier_links?.buyer?.display_name || null,
-      supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
-      _source: 'relational'
-    }))
+    const allPOs = [
+      ...newPOs.map(po => ({
+        ...po,
+        buyer_name:    po.buyer_supplier_links?.buyer?.display_name    || null,
+        supplier_name: po.buyer_supplier_links?.supplier?.display_name || null,
+        _source: 'relational'
+      })),
+      ...legacyPOs.map(po => ({
+        ...po,
+        supplier_name: null,
+        _source: 'legacy'
+      }))
+    ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
 
-    const normalizedLegacy = legacyPOs.map(po => ({
-      ...po,
-      buyer_name: po.buyer_name,
-      supplier_name: null,
-      _source: 'legacy'
-    }))
-
-    const allPOs = [...normalizedNew, ...normalizedLegacy]
-      .sort((a, b) => new Date(b.created_at) - new Date(a.created_at))
-
-    return res.json({
-      success: true,
-      pos: allPOs,
-      count: allPOs.length
-    })
+    return res.json({ success: true, pos: allPOs, count: allPOs.length })
 
   } catch (err) {
     console.error('❌ Fetch buyer POs failed:', err)
-    res.status(500).json({
-      error: err.message || 'Server Error'
-    })
+    res.status(500).json({ error: err.message || 'Server Error' })
   }
 })
-
 
 
 
