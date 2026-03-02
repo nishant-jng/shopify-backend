@@ -214,6 +214,51 @@ function generateEmailTemplate(alertType, alertMessage, poDetails) {
       calloutText: `<strong>Notice:</strong> ${alertMessage}`, 
     }),
   };
+ case 'PI_REMINDER':
+  return {
+    subject: `PI Due Tomorrow — ${poDetails.buyer_name} · PO#${poDetails.po_number || 'N/A'}`,
+    html: wrapTemplate({
+      accentColor: '#000000',
+      iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="white" stroke-width="1.8"/><polyline points="12 6 12 12 16 14" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>',
+      badgeLabel: 'Due Tomorrow',
+      badgeColor: '#000000',
+      title: 'PI Confirmation Due Tomorrow',
+      subtitle: `Last day to confirm · PO#${poDetails.po_number || 'N/A'}`,
+      rows: [
+        ['Buyer',        poDetails.buyer_name],
+        ['Supplier',     poDetails.supplier_name],
+        ['PO Number',    poDetails.po_number],
+        ['PO Received',  poDetails.date],
+        ['Deadline',     'Tomorrow'],
+      ],
+      calloutBg: '#f5f5f5',
+      calloutBorder: '#000000',
+      calloutText: '<strong>Reminder:</strong> Tomorrow is the last day to confirm the Proforma Invoice for this order. Please log in to your dashboard and upload the PI before the deadline.',
+    }),
+  };
+
+case 'PI_OVERDUE':
+  return {
+    subject: `PI Overdue — ${poDetails.buyer_name} · PO#${poDetails.po_number || 'N/A'}`,
+    html: wrapTemplate({
+      accentColor: '#000000',
+      iconChar: '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="9" x2="12" y2="13" stroke="white" stroke-width="1.8" stroke-linecap="round"/><line x1="12" y1="17" x2="12.01" y2="17" stroke="white" stroke-width="2" stroke-linecap="round"/></svg>',
+      badgeLabel: 'Overdue',
+      badgeColor: '#000000',
+      title: 'PI Confirmation Overdue',
+      subtitle: `${poDetails.days_since} days since PO received · PO#${poDetails.po_number || 'N/A'}`,
+      rows: [
+        ['Buyer',        poDetails.buyer_name],
+        ['Supplier',     poDetails.supplier_name],
+        ['PO Number',    poDetails.po_number],
+        ['PO Received',  poDetails.date],
+        ['Days Elapsed', `${poDetails.days_since} days`],
+      ],
+      calloutBg: '#f5f5f5',
+      calloutBorder: '#000000',
+      calloutText: '<strong>Action Required:</strong> The 5-day window to confirm the Proforma Invoice has passed. Please log in to your dashboard to either upload the PI or <strong>state the reason for delay</strong>.',
+    }),
+  };
     // ── Default / fallback ───────────────────
     default:
       return {

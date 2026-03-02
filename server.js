@@ -19,6 +19,8 @@ const travelRoutes = require('./routes/travelBill');
 const testRoutes = require('./routes/test');
 const buyersRoutes = require('./routes/buyers');
 const consultancyInvoicesRoutes = require('./routes/consultancyInvoices');
+const cronJobsRoutes = require('./routes/cronJobs');
+// const databaseWebhooks = require('./routes/databaseWebhooks');
 
  
 // --- Environment Variable Validation ---
@@ -83,6 +85,8 @@ app.use('/proxy/travel-bill', travelRoutes);
 app.use('/test', testRoutes);
 app.use('/volume', buyersRoutes);
 app.use('/proxy/consultancy', consultancyInvoicesRoutes);
+app.use('/cron', cronJobsRoutes);
+// app.use('/webhooks', databaseWebhooks);
 
 
 // --- Core Routes ---
