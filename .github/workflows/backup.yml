@@ -9,17 +9,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Install pg tools
-        run: sudo apt-get install -y curl ca-certificates
-            curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
-            echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
-            sudo apt-get update
-            sudo apt-get install -y postgresql-client-17
-
+        run: |
+          sudo apt-get install -y curl ca-certificates
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+          echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
 
       - name: Dump and restore
         env:
-            SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-            NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          NEON_DB_URL: ${{ secrets.NEON_DB_URL }}
         run: |
-            pg_dump "$SUPABASE_DB_URL" --no-owner --no-acl -Fc --schema=public --section=pre-data --section=data --section=post-data -f backup.dump
-            pg_restore --clean --if-exists --no-owner --no-acl -d "$NEON_DB_URL" backup.dump
+          pg_dump "$SUPABASE_DB_URL" --no-owner --no-acl -Fc --schema=public --section=pre-data --section=data --section=post-data -f backup.dump
+          pg_restore --clean --if-exists --no-owner --no-acl -d "$NEON_DB_URL" backup.dump
