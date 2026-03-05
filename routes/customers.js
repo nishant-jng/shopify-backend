@@ -4118,11 +4118,7 @@ router.get("/customer/:customerId/admin-volume-origin", async (req, res) => {
         details: "Customer ID is required"
       });
     }
-    let allowedBuyers = [];
-   const buyersParam = req.query.buyers;
-  if (buyersParam) {
-    allowedBuyers = buyersParam.split(',').map(b => b.trim().toUpperCase()).filter(b => b);
-  } else {
+   
     // ── STEP 1: Fetch logged-in customer's buyers metafield (unchanged) ──
     const customerQuery = `
       query getCustomerBuyers($customerId: ID!) {
@@ -4150,7 +4146,7 @@ router.get("/customer/:customerId/admin-volume-origin", async (req, res) => {
 
     const customerBuyersValue = customerResponse.data?.data?.customer?.metafield?.value;
 
-    
+    let allowedBuyers = [];
     if (customerBuyersValue) {
       try {
         const parsed = JSON.parse(customerBuyersValue);
@@ -4163,7 +4159,7 @@ router.get("/customer/:customerId/admin-volume-origin", async (req, res) => {
           .map(b => b.trim().toUpperCase())
           .filter(b => b);
       }
-    }}
+    }
 
     // ── STEP 2 (NEW): If ?merchant= passed, check if admin and override buyers ──
     if (merchant && allowedBuyers.length > 0) {
